@@ -134,12 +134,18 @@ export const bundleStamp = (b: WeeklyBundle) => {
   const t = Date.parse(String(b.timestamp || ''));
   return isNaN(t) ? 0 : t;
 };
+/** Disemak = status DISEMAK, atau ada PDF semakan yang BERBEZA daripada PDF hantaran guru. */
+export const isBundleReviewed = (b: WeeklyBundle) => {
+  if (String(b.status_proses || '').toUpperCase() === 'DISEMAK') return true;
+  const done = String(b.linkPdfSelesai || '').trim();
+  return !!done && done !== String(b.jana_url || '').trim() && done !== String(b.pdfBase64 || '').trim();
+};
 const teacherKey = (b: WeeklyBundle) => String(b.teacherId || b.teacherName || '').trim().toLowerCase();
 
 /** Satu hantaran sahaja bagi setiap guru + minggu: utamakan yang DISEMAK, jika tiada ambil yang terkini. */
 export function dedupeBundles(bundles: WeeklyBundle[]): WeeklyBundle[] {
   const best = new Map<string, WeeklyBundle>();
-  const rank = (b: WeeklyBundle) => (b.status_proses === 'DISEMAK' || (b.linkPdfSelesai && b.linkPdfSelesai.trim()) ? 1 : 0);
+  const rank = (b: WeeklyBundle) => (isBundleReviewed(b) ? 1 : 0);
   for (const b of bundles) {
     const k = `${teacherKey(b)}|${weekNumOf(b.week)}`;
     const cur = best.get(k);

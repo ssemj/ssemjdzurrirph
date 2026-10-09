@@ -1,4 +1,5 @@
 
+import { isBundleReviewed } from '../services/reviewService';
 import React, { useState, useMemo, useRef, useCallback, useEffect } from 'react';
 import { UserProfile, ERPHData, WeeklyBundle, MasterData, ERPHStatus, Resource } from '../types';
 import { 
@@ -337,9 +338,9 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const stats = useMemo(() => {
     return {
       totalTeachers: teachers.length,
-      pendingReviews: bundles.filter(b => b.status_proses !== 'DISEMAK' && (!b.linkPdfSelesai || b.linkPdfSelesai.trim() === "")).length,
+      pendingReviews: bundles.filter(b => !isBundleReviewed(b)).length,
       totalErphs: erphs.length,
-      completedReviews: bundles.filter(b => b.status_proses === 'DISEMAK' || (b.linkPdfSelesai && b.linkPdfSelesai.trim() !== "")).length
+      completedReviews: bundles.filter(b => isBundleReviewed(b)).length
     };
   }, [teachers, bundles, erphs]);
 
@@ -565,7 +566,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   const pendingBundles = useMemo(() => {
-    return bundles.filter(b => b.status_proses !== 'DISEMAK' && (!b.linkPdfSelesai || b.linkPdfSelesai.trim() === ""));
+    return bundles.filter(b => !isBundleReviewed(b));
   }, [bundles]);
 
   const groupedPendingBundles = useMemo(() => {
@@ -587,7 +588,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   const sortedReviewedBundles = useMemo(() => {
     return bundles
-      .filter(b => b.status_proses === 'DISEMAK' || (b.linkPdfSelesai && b.linkPdfSelesai.trim() !== ""))
+      .filter(b => isBundleReviewed(b))
       .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
   }, [bundles]);
 

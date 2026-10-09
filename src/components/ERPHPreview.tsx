@@ -81,11 +81,11 @@ const ERPHPreview: React.FC<ERPHPreviewProps> = ({ erphs, onBack, onSubmit, hide
     
     setIsGenerating(true);
     try {
-      const pdfBase64 = await generatePDFBase64();
-      await onSubmit(erphs[0].week, pdfBase64);
+      // Hantaran kini terus ke Firebase — tiada penjanaan/muat naik PDF (PDF dijana semula bila dibuka)
+      await onSubmit(erphs[0].week, '');
     } catch (error) {
-      console.error("PDF Generation Error:", error);
-      alert("Gagal menjana PDF. Sila cuba lagi.");
+      console.error("Hantar Error:", error);
+      alert("Gagal menghantar. Sila cuba lagi.");
     } finally {
       setIsGenerating(false);
     }

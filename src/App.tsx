@@ -5,7 +5,7 @@ import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { UserProfile, UserRole, ERPHData, ERPHStatus, MasterData, Resource, WeeklyBundle, AppNotification, ScheduleSlot, DskpDocument, AcademicCalendar, RptDocument, TeacherTimetable } from './types';
 import { loadTimetable, saveTimetable, DEFAULT_AUTOPILOT } from './services/timetableService';
 import { loadAllRpt } from './services/rptService';
-import { BundleReviewDoc, loadBundleReviews, loadSignatures, overlayBundles, overlayErphs, parseRphIds, reviewBundlesFs, saveSubmissionFs, cancelBundleFs, dedupeBundles, weekNumOf } from './services/reviewService';
+import { BundleReviewDoc, loadBundleReviews, loadSignatures, overlayBundles, overlayErphs, parseRphIds, reviewBundlesFs, saveSubmissionFs, cancelBundleFs, dedupeBundles, weekNumOf, isBundleReviewed } from './services/reviewService';
 import { runAutoRph } from './services/autoRphRunner';
 import { dayNameOf as dayNameOfDate, autoErphId as autoErphIdOf } from './services/autoRphCore';
 import { getGeminiKey } from './services/geminiService';
@@ -582,8 +582,8 @@ const App: React.FC = () => {
   useEffect(() => { loadBranding(); }, []);
 
   useEffect(() => {
-    if (user) { reloadDskp(); reloadCalendar(); reloadRpt(); }
-  }, [user?.id, reloadDskp, reloadCalendar, reloadRpt]);
+    if (user) { reloadDskp(); reloadCalendar(); reloadRpt(); reloadReviews(user); }   // hantaran/semakan Firebase tidak bergantung pada Google Sheet
+  }, [user?.id, reloadDskp, reloadCalendar, reloadRpt, reloadReviews]);
 
   // Muat jadual waktu guru dari Firestore; jika tiada, guna jadual lama (localStorage / Google Sheet)
   useEffect(() => {
@@ -821,12 +821,12 @@ const App: React.FC = () => {
     weekNumOf(b.week) === Number(week) && (
       String(b.teacherId || '').trim().toLowerCase() === String(user?.id || '').trim().toLowerCase() ||
       String(b.teacherName || '').trim().toLowerCase() === String(user?.name || '').trim().toLowerCase()));
-  const isReviewedBundle = (b: WeeklyBundle) => b.status_proses === 'DISEMAK' || !!(b.linkPdfSelesai && b.linkPdfSelesai.trim());
+  const isReviewedBundle = isBundleReviewed;
 
   /** Batal (tarik balik) hantaran yang belum disemak → RPH kembali ke Draf. */
-  const handleCancelBundle = async (b: WeeklyBundle, silent = false) => {
+  const handleCancelBundle = async (b: WeeklyBundle, silent = false, force = false) => {
     if (!user) return;
-    if (isReviewedBundle(b)) { showNotification('Hantaran ini sudah disemak dan tidak boleh dibatalkan.', 'error'); return; }
+    if (!force && isReviewedBundle(b)) { showNotification('Hantaran ini sudah disemak dan tidak boleh dibatalkan.', 'error'); return; }
     const ids = bundleRphIdsOf(b);
     try {
       const at = await cancelBundleFs(b, ids, user.id);
@@ -847,19 +847,37 @@ const App: React.FC = () => {
     }
   };
 
-  const handleBulkSubmitWeek = async (week: number, existingPdfBase64?: string) => {
+  const handleBulkSubmitWeek = async (week: number, _pdfIgnored?: string) => {
     if (!user) return;
     if (submittingRef.current) return;              // elak klik berganda
-    const existing = myBundlesForWeek(week);
-    if (existing.some(isReviewedBundle)) {
-      showNotification(`Minggu ${week} sudah DISEMAK oleh pentadbir. Hantaran semula tidak dibenarkan.`, 'error');
+    const mine = (r: { teacherId?: string; teacherName?: string }) =>
+      String(r.teacherId || '').trim().toLowerCase() === String(user.id || '').trim().toLowerCase() ||
+      String(r.teacherName || '').trim().toLowerCase() === String(user.name || '').trim().toLowerCase();
+
+    // 1) FIREBASE = sumber utama: hantaran aktif bagi minggu ini
+    const fsWeek = fsReviews.filter(r => mine(r) && weekNumOf(r.week) === Number(week) && r.status_proses !== 'DIBATALKAN');
+    const fsReviewed = fsWeek.find(r => r.status_proses === 'DISEMAK');
+    if (fsReviewed) {
+      showNotification(`Minggu ${week} sudah DISEMAK oleh ${fsReviewed.reviewedBy || 'pentadbir'}. Hantaran semula tidak dibenarkan.`, 'error');
       return;
     }
-    if (existing.length > 0) {
-      const ok = window.confirm(`Minggu ${week} sudah dihantar dan sedang menunggu semakan.\n\nBatalkan hantaran lama dan hantar versi terkini?`);
-      if (!ok) return;
+    // 2) Rekod LAMA dari Google Sheet (sebelum Firebase) — tidak menyekat, guru boleh gantikan
+    const legacy = myBundlesForWeek(week).filter(b => !fsReviews.some(r => r.id_minggu === b.id_minggu));
+    const toReplace: WeeklyBundle[] = [
+      ...fsWeek.map(r => bundles.find(b => b.id_minggu === r.id_minggu) || ({
+        id_minggu: r.id_minggu, teacherId: r.teacherId, teacherName: r.teacherName, week: r.week, rphIds: r.rphIds,
+        status_proses: r.status_proses, status: r.status_proses, timestamp: r.timestamp || '', jana_url: '',
+      } as WeeklyBundle)),
+      ...legacy,
+    ];
+    if (toReplace.length > 0) {
+      const legacyReviewed = legacy.some(isReviewedBundle);
+      const msg = legacyReviewed
+        ? `Rekod lama (Google Sheet) menunjukkan Minggu ${week} pernah dihantar/disemak.\n\nGantikan dengan hantaran baharu di Firebase?`
+        : `Minggu ${week} sudah dihantar dan sedang menunggu semakan.\n\nBatalkan hantaran lama dan hantar versi terkini?`;
+      if (!window.confirm(msg)) return;
       submittingRef.current = true;
-      try { for (const b of existing) await handleCancelBundle(b, true); }
+      try { for (const b of toReplace) await handleCancelBundle(b, true, true); }
       catch { submittingRef.current = false; return; }
     }
     submittingRef.current = true;
@@ -871,34 +889,21 @@ const App: React.FC = () => {
     setIsProcessingBundle(true);
     try {
       const id_minggu = `M${week}_${user.id}_${Date.now()}`;
-      const payload = {
-        logType: "WEEKLY_SUBMISSION",
-        teacherName: user.name,
-        teacherId: user.id,
-        week: `Minggu ${week}`,
-        id_minggu: id_minggu,
-        rphIds: JSON.stringify(weekRPHs.map(r => r.id)),
-        pdfBase64: existingPdfBase64
-      };
-
-      // Hantaran direkod di Firebase (weekly_bundles) — pentadbir terus nampak tanpa tunggu Google Sheet
+      // HANTARAN → FIREBASE SAHAJA (tiada lagi Google Sheet / muat naik PDF)
       const fsDoc = { id_minggu, teacherId: user.id, teacherName: user.name, week: `Minggu ${week}`, rphIds: weekRPHs.map(r => r.id) };
-      fbBackground(saveSubmissionFs(fsDoc));
-      setFsReviews(prev => [...prev.filter(r => r.id_minggu !== id_minggu), { ...fsDoc, rphIds: JSON.stringify(fsDoc.rphIds), status_proses: 'PENDING', timestamp: new Date().toISOString(), fsUpdatedAt: new Date().toISOString() }]);
-
-      await fetch(GAS_WEB_APP_URL, {
-        method: 'POST', mode: 'no-cors',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify(payload)
-      });
-
-      setAllErphs(prev => prev.map(e => weekRPHs.some(wr => wr.id === e.id) ? { ...e, status: ERPHStatus.SELESAI } : e));
+      await saveSubmissionFs(fsDoc);
+      const now = new Date().toISOString();
+      setFsReviews(prev => [...prev.filter(r => r.id_minggu !== id_minggu), { ...fsDoc, rphIds: JSON.stringify(fsDoc.rphIds), status_proses: 'PENDING', timestamp: now, fsUpdatedAt: now }]);
+      setOverlayTick(t => t + 1);
+      // Status RPH → Dihantar (Firebase)
+      const batchIds = weekRPHs.map(r => r.id);
+      setAllErphs(prev => prev.map(e => batchIds.includes(e.id) ? { ...e, status: ERPHStatus.SELESAI } : e));
+      weekRPHs.forEach(e => fbBackground(setDoc(doc(db, "erph_records", String(e.id).replace(/\//g, '_')), { status: ERPHStatus.SELESAI, submittedAt: now, bundleId: id_minggu }, { merge: true })));
       showNotification(`✅ Minggu ${week} telah berjaya dihantar!`, 'success');
       setView('DASHBOARD');
       setPreviewErphs([]);
-      setTimeout(handleSyncCloud, 3000); 
-    } catch (e: any) { 
-      showNotification("Gagal hantar. Sila cuba lagi.", "error");
+    } catch (e: any) {
+      showNotification("Gagal hantar: " + (e?.message || 'sila cuba lagi'), "error");
     } finally { setIsProcessingBundle(false); submittingRef.current = false; }
   };
 

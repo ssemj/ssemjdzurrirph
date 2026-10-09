@@ -9,6 +9,7 @@ import { WEEKS, formatDate } from '../constants';
 
 import ResourceCenter from './ResourceCenter';
 import SchoolTimetableGrid from './SchoolTimetableGrid';
+import { isBundleReviewed } from '../services/reviewService';
 const DSKPUploader = React.lazy(() => import('./DSKPUploader'));
 const RPHArchiveDownload = React.lazy(() => import('./RPHArchiveDownload'));
 
@@ -233,7 +234,7 @@ const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
     return {
       draft: erphs.filter(e => e.status === ERPHStatus.DRAFT).length,
       hantaranMingguan: bundles.length,
-      belumDisahkan: bundles.filter(b => b.status_proses !== 'DISEMAK' && (!b.linkPdfSelesai || b.linkPdfSelesai.trim() === "")).length,
+      belumDisahkan: bundles.filter(b => !isBundleReviewed(b)).length,
     };
   }, [erphs, bundles]);
 
@@ -542,7 +543,7 @@ const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
              </div>
            ) : (
              bundles.map((bundle, idx) => {
-               const isReviewed = bundle.status_proses === 'DISEMAK' || (bundle.linkPdfSelesai && bundle.linkPdfSelesai.trim() !== "");
+               const isReviewed = isBundleReviewed(bundle);
                const finalLink = (bundle.linkPdfSelesai && bundle.linkPdfSelesai.trim() !== "") 
                                 ? bundle.linkPdfSelesai 
                                 : (bundle.jana_url || bundle.pdfBase64);
