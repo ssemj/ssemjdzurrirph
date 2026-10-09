@@ -3,7 +3,7 @@ import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { UserProfile, ERPHData, ERPHStatus, WeeklyBundle, Resource, DskpLink, AppNotification, ScheduleSlot, MasterData } from '../types';
 import { 
   Calendar, FileText, CheckCircle2, Clock, Plus, Pencil, Copy, Eye, FileDown, AlertCircle, SendHorizontal, Layers, ChevronRight, UserCheck, Filter, ChevronDown, 
-  Database, BookOpen, LayoutGrid, BarChart3, MessageCircle, Info, ExternalLink, X, Link as LinkIcon, Share2, Search, ArrowRight, Bell, Trash2, RefreshCw
+  Database, BookOpen, LayoutGrid, BarChart3, MessageCircle, Info, ExternalLink, X, Link as LinkIcon, Share2, Search, ArrowRight, Bell, Trash2, RefreshCw, Sparkles
 } from 'lucide-react';
 import { WEEKS, formatDate } from '../constants';
 
@@ -42,6 +42,10 @@ interface TeacherDashboardProps {
   onDeleteResource?: (id: string) => void;
   notifications?: AppNotification[];
   syncStatus?: 'IDLE' | 'SYNCING' | 'OFFLINE';
+  /** Kad RPH Automatik AI (dipaparkan di bawah kepala dashboard) */
+  topSlot?: React.ReactNode;
+  /** Buka RPH hantaran yang disemak (PDF rasmi dijana semula daripada data Firebase) */
+  onViewBundle?: (bundle: WeeklyBundle) => void;
 }
 
 const UTILITY_MENUS = [
@@ -51,6 +55,7 @@ const UTILITY_MENUS = [
   { id: 'UPLOAD_DSKP', label: 'Muat Naik DSKP', icon: Database, color: 'bg-emerald-600' },
   { id: 'ANALYSIS', label: 'Analisis', icon: BarChart3, color: 'bg-purple-600' },
   { id: 'SCHEDULE', label: 'Jadual', icon: LayoutGrid, color: 'bg-fuchsia-600' },
+  { id: 'AUTO_RPH', label: 'RPH Automatik AI', icon: Sparkles, color: 'bg-indigo-600' },
   { id: 'CHAT', label: 'Notifikasi', icon: MessageCircle, color: 'bg-pink-600' },
   { id: 'REKOD_PENCERAPAN', label: 'Pencerapan', icon: UserCheck, color: 'bg-emerald-600' },
 ];
@@ -60,7 +65,9 @@ const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   onAddNew, onEdit, onCopy, onView, onShare, onDelete, onSelectScheduleSlot, onViewWeek, onDskpUpdated, onOpenWeek, focusWeek, onShareWeek, onBulkSubmit, onNavigate, onSync, 
   onAddResource, onDeleteResource,
   notifications = [],
-  syncStatus = 'IDLE'
+  syncStatus = 'IDLE',
+  topSlot,
+  onViewBundle
 }) => {
   const isAdmin = user.role === 'ADMIN' || !!adminUser;
   const [weekFilter, setWeekFilter] = useState<number | 'all'>('all'); 
@@ -273,6 +280,9 @@ const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
           </button>
         </div>
       </div>
+
+      {/* ===== RPH Automatik AI ===== */}
+      {topSlot}
 
       {/* ===== Statistik ringkas ===== */}
       <div className="grid grid-cols-3 gap-2 sm:gap-3">
@@ -549,7 +559,7 @@ const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                              <p className="text-[8px] italic text-emerald-800 line-clamp-2 leading-tight">"{bundle.comment || "Rekod telah disemak."}"</p>
                            </div>
                            <button 
-                             onClick={() => finalLink && window.open(finalLink, '_blank')}
+                             onClick={() => (bundle.linkPdfSelesai && bundle.linkPdfSelesai.trim() !== '') ? window.open(bundle.linkPdfSelesai, '_blank') : (onViewBundle ? onViewBundle(bundle) : finalLink && window.open(finalLink, '_blank'))}
                              className="w-full flex items-center justify-center gap-1.5 bg-emerald-600 text-white py-2.5 rounded-lg md:rounded-xl font-black text-[8px] md:text-[9px] uppercase shadow-lg hover:bg-emerald-700 transition-all active:scale-95"
                            >
                              <FileDown size={14} /> Lihat Template Rasmi
@@ -591,6 +601,7 @@ const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                   if (menu.id === 'ANALYSIS') onNavigate?.('ANALYSIS');
                   else if (menu.id === 'CHAT') onNavigate?.('CHAT');
                   else if (menu.id === 'SCHEDULE') onNavigate?.('TIMETABLE');
+                  else if (menu.id === 'AUTO_RPH') onNavigate?.('AUTO_RPH');
                   else if (menu.id === 'REKOD_PENCERAPAN') onNavigate?.('REKOD_PENCERAPAN');
                   else setActiveResView(activeResView === menu.id ? null : menu.id);
                 }}

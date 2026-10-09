@@ -4,10 +4,10 @@
 // Slot diambil daripada Jadual Waktu guru + RPH yang sudah disimpan.
 // ============================================================
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { CalendarDays, CheckCircle2, AlertTriangle, Circle, Copy, Plus, X, SendHorizontal, ChevronRight, Clock } from 'lucide-react';
+import { CalendarDays, CheckCircle2, AlertTriangle, Circle, Copy, Plus, X, SendHorizontal, ChevronRight, Clock, Sparkles, Loader2, Trash2 } from 'lucide-react';
 import ERPHForm from './ERPHForm';
 import CopyRphModal, { CopyTarget, cleanCopy } from './CopyRphModal';
-import { AcademicCalendar, DskpDocument, ERPHData, ERPHStatus, MasterData, ScheduleSlot, UserProfile } from '../types';
+import { AcademicCalendar, DskpDocument, ERPHData, ERPHStatus, MasterData, RptDocument, ScheduleSlot, UserProfile } from '../types';
 import { weekToMonday, dateToWeek, holidayOn } from '../services/calendarService';
 import { WEEKS } from '../constants';
 
@@ -39,6 +39,15 @@ interface Props {
   user: UserProfile;
   masterData: MasterData;
   dskpDocs?: DskpDocument[];
+  rptDocs?: RptDocument[];
+  /** Status penjanaan AI pukal & tindakan */
+  autoRun?: { running: boolean; message: string; done: number; total: number };
+  onGenerateWeek?: (date: string) => void;
+  onStopAuto?: () => void;
+  /** RPH / slot yang dipadam (status DELETED) — slot jadual tidak dipaparkan lagi */
+  deletedErphs?: ERPHData[];
+  onDelete?: (id: string) => void;
+  onSkipSlot?: (data: ERPHData) => void;
   erphs: ERPHData[];
   masterSchedule: ScheduleSlot[];
   /** @deprecated Groq telah dibuang */
@@ -56,7 +65,7 @@ interface Props {
 }
 
 const WeeklyERPHEditor: React.FC<Props> = ({
-  user, masterData, dskpDocs = [], erphs, masterSchedule, initialErph, initialWeek, onSave, onSaveMany, calendar, onClose, onPreviewWeek,
+  user, masterData, dskpDocs = [], rptDocs = [], autoRun, onGenerateWeek, onStopAuto, deletedErphs = [], onDelete, onSkipSlot, erphs, masterSchedule, initialErph, initialWeek, onSave, onSaveMany, calendar, onClose, onPreviewWeek,
 }) => {
   const isMine = (e: ERPHData) =>
     String(e.teacherId || '').trim().toLowerCase() === String(user.id || '').trim().toLowerCase() ||
@@ -129,6 +138,10 @@ const WeeklyERPHEditor: React.FC<Props> = ({
 
       const mySlots = masterSchedule
         .filter(s => s.teacherId === user.id && normDay(s.day) === day)
+        .filter(s => !deletedErphs.some(x =>                       // slot dipadam guru untuk tarikh ini
+          x.date === dateOf(day) && x.startTime === s.startTime &&
+          String(x.classTitle || '').toLowerCase() === String(s.classTitle || '').toLowerCase() &&
+          String(x.subject || '').toLowerCase() === String(s.subject || '').toLowerCase()))
         .filter(s => !saved.some(x =>
           x.data.startTime === s.startTime &&
           String(x.data.classTitle || '').toLowerCase() === String(s.classTitle || '').toLowerCase() &&
@@ -151,7 +164,7 @@ const WeeklyERPHEditor: React.FC<Props> = ({
       map[day] = [...saved, ...slotEntries, ...extras].sort((a, b) => String(a.data.startTime).localeCompare(String(b.data.startTime)));
     });
     return map;
-  }, [weekErphs, masterSchedule, extraEntries, week, monday, user.id, user.name]);
+  }, [weekErphs, masterSchedule, extraEntries, week, monday, user.id, user.name, deletedErphs]);
 
 
   const dayEntries = entriesByDay[activeDay] || [];
@@ -177,6 +190,22 @@ const WeeklyERPHEditor: React.FC<Props> = ({
     } as ERPHData;
     setExtraEntries(prev => [...prev, { key: id, day: activeDay, data, saved: false }]);
     setActiveKey(id);
+  };
+
+  // ---- Padam RPH / slot yang tidak diperlukan ----
+  const deleteEntry = (e: Entry) => {
+    const d = e.data;
+    const label = `${d.day || ''} ${shortDate(d.date)} • ${d.startTime} • ${d.subject || 'Slot'} ${d.classTitle || ''}`;
+    if (e.saved) {
+      if (d.status === ERPHStatus.REVIEWED) { alert('RPH ini sudah DISEMAK oleh pentadbir dan tidak boleh dipadam.'); return; }
+      const warn = d.status === ERPHStatus.SELESAI ? '\n\nRPH ini SUDAH DIHANTAR untuk semakan.' : '';
+      if (!confirm(`Padam RPH ini?\n${label}${warn}\n\nSlot ini tidak akan dijana semula oleh AI.`)) return;
+      onDelete?.(d.id);
+    } else {
+      if (!confirm(`Padam slot ini untuk tarikh ini sahaja?\n${label}\n\n(Cth: tiada kelas / program sekolah). Jadual waktu asal tidak berubah dan AI tidak akan menjana RPH untuk slot ini.`)) return;
+      onSkipSlot?.(d);
+    }
+    if (activeKey === e.key) setActiveKey(null);
   };
 
   // ---- Salin RPH minggu lepas → minggu ini, ikut hari ----
@@ -372,8 +401,11 @@ const WeeklyERPHEditor: React.FC<Props> = ({
                   <span>{e.data.subject || 'Slot baharu'}</span>
                   {e.data.classTitle && <span className="opacity-70">· {e.data.classTitle}</span>}
                 </button>
-                {isExtra && (
+                {isExtra ? (
                   <button onClick={() => removeExtra(e.key)} className={`pr-2 ${active ? 'text-white/70 hover:text-white' : 'text-slate-300 hover:text-red-500'}`} title="Buang slot (belum disimpan)"><X size={12} /></button>
+                ) : (onDelete || onSkipSlot) && (
+                  <button onClick={() => deleteEntry(e)} className={`pr-2.5 ${active ? 'text-white/70 hover:text-white' : 'text-slate-300 hover:text-red-500'}`}
+                    title={e.saved ? 'Padam RPH ini' : 'Padam slot ini untuk tarikh ini (AI tidak akan menjananya)'}><Trash2 size={13} /></button>
                 )}
               </div>
             );
@@ -381,6 +413,18 @@ const WeeklyERPHEditor: React.FC<Props> = ({
           <button onClick={addEntry} className="flex items-center gap-1 px-3 py-2 rounded-xl border border-dashed border-slate-300 text-[11px] font-bold text-slate-500 hover:border-blue-500 hover:text-blue-600">
             <Plus size={14} /> Tambah slot
           </button>
+          {onGenerateWeek && (autoRun?.running ? (
+            <button onClick={onStopAuto} title={autoRun.message}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-rose-500 text-white text-[11px] font-bold hover:bg-rose-600">
+              <Loader2 size={14} className="animate-spin" /> {autoRun.total ? `${autoRun.done}/${autoRun.total} • ` : ''}Henti Jana
+            </button>
+          ) : (
+            <button onClick={() => onGenerateWeek(monday)}
+              title="AI jana semua slot kosong minggu ini hingga Isnin minggu hadapan (Isnin depan tanpa refleksi)"
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-amber-400 text-slate-900 text-[11px] font-bold hover:bg-amber-300">
+              <Sparkles size={14} /> Jana Seminggu AI (Isnin→Isnin)
+            </button>
+          ))}
           {onSaveMany && (
             <button onClick={copyPreviousWeek} disabled={!prevWeekSource || copyingWeek}
               title={prevWeekSource ? `Salin semua RPH Minggu ${prevWeekSource.week} ke Minggu ${week}, ikut hari` : 'Tiada RPH minggu sebelumnya'}
@@ -431,6 +475,7 @@ const WeeklyERPHEditor: React.FC<Props> = ({
                 user={user}
                 masterData={masterData}
                 dskpDocs={dskpDocs}
+                rptDocs={rptDocs}
                 erphs={erphs}
                 masterSchedule={masterSchedule}
                 initialData={formInitial}

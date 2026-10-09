@@ -29,7 +29,11 @@ interface AdminDashboardProps {
   masterData: MasterData;
   setMasterData: (data: MasterData) => void;
   onReview: (id: string, status: ERPHStatus, comment: string, signature: string) => void;
-  onReviewBundle: (bundleId: string, status: string, comment: string, signature: string, reviewedBy: string, reviewedPdfBase64?: string) => void;
+  onReviewBundle: (bundleId: string, status: string, comment: string, signature: string, reviewedBy: string, reviewedPdfBase64?: string, reviewerDesignation?: string) => void | Promise<void>;
+  /** Semakan pukal → Firebase (satu batch) */
+  onReviewBundles?: (bundleIds: string[], status: string, comment: string, signature: string, reviewedBy: string, reviewerDesignation?: string, onProgress?: (done: number, total: number) => void) => Promise<void>;
+  /** Buka RPH hantaran (PDF rasmi dijana semula) bila tiada pautan PDF Google Drive */
+  onViewBundle?: (bundle: WeeklyBundle) => void;
   onSyncMaster: (data: MasterData) => Promise<boolean>;
   onRefresh: () => Promise<void>;
   onLogout: () => void;
@@ -223,7 +227,7 @@ const TeacherInfoCard: React.FC<{ teacher: any; bundles: WeeklyBundle[]; onBack:
 };
 
 const AdminDashboard: React.FC<AdminDashboardProps> = ({ 
-  user, teachers, erphs, bundles, masterData, setMasterData, onReview, onReviewBundle, onSyncMaster, onRefresh, onLogout, onNavigate, onLoginAsTeacher, onAddResource, onDeleteResource, onDskpUpdated, onCalendarUpdated
+  user, teachers, erphs, bundles, masterData, setMasterData, onReview, onReviewBundle, onReviewBundles, onViewBundle, onSyncMaster, onRefresh, onLogout, onNavigate, onLoginAsTeacher, onAddResource, onDeleteResource, onDskpUpdated, onCalendarUpdated
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [activeResView, setActiveResView] = useState<string | null>(null);
@@ -489,23 +493,15 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setIsSubmittingReview(true);
     console.log("Starting review submission...");
     try {
-      console.log("Generating PDF on frontend with extreme compression...");
-      const rasmiPdfBase64 = await generateRasmiPDF(currentSignature);
-      
-      if (!rasmiPdfBase64 || rasmiPdfBase64.length < 1000) {
-        throw new Error("PDF generation failed or result too small");
-      }
-      
-      const pdfSize = Math.round(rasmiPdfBase64.length / 1024);
-      console.log(`PDF generated successfully. Size: ${pdfSize}KB. Sending to server...`);
-      
+      // Terus ke Firebase — tiada penjanaan / muat naik PDF (PDF rasmi dijana semula bila dibuka)
       await onReviewBundle(
-        reviewingBundle.id_minggu, 
-        "DISEMAK", 
-        reviewComment, 
+        reviewingBundle.id_minggu,
+        "DISEMAK",
+        reviewComment,
         currentSignature,
         reviewerInfo.name,
-        rasmiPdfBase64
+        undefined,
+        reviewerInfo.designation
       );
       
       console.log("Review submitted successfully.");
@@ -527,62 +523,19 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setBulkProgress({ current: 0, total: selectedBundleIds.length });
     
     try {
-      for (let i = 0; i < selectedBundleIds.length; i++) {
-        setBulkProgress({ current: i + 1, total: selectedBundleIds.length });
-        
-        const id = selectedBundleIds[i];
-        const bundle = bundles.find(b => b.id_minggu === id);
-        if (!bundle) continue;
-
-        // 1. Set as active bulk bundle to trigger hidden preview render
-        setBulkActiveBundle(bundle);
-        
-        // 2. Wait for React to update the DOM (crucial for html2canvas)
-        await new Promise(resolve => setTimeout(resolve, 2000));
-
-        try {
-          console.log(`[BULK] Memproses hantaran ${i+1}/${selectedBundleIds.length}: ${bundle.teacherName}`);
-          
-          // 3. Generate PDF using the bulk data
-          const rasmiPdfBase64 = await generateRasmiPDF(
-            bulkSignature, 
-            bundle, 
-            bulkComment || "Disemak dan disahkan secara pukal.",
-            bulkReviewerInfo
-          );
-
-          if (!rasmiPdfBase64 || rasmiPdfBase64.length < 1000) {
-            console.error(`[BULK] Gagal menjana PDF untuk ${bundle.teacherName}: PDF kosong atau terlalu kecil`);
-            throw new Error("PDF generation failed or result too small");
-          }
-          
-          const pdfSize = Math.round(rasmiPdfBase64.length / 1024);
-          console.log(`[BULK] PDF berjaya dijana untuk ${bundle.teacherName} (Saiz: ${pdfSize}KB), menghantar ke GAS...`);
-
-          // 4. Submit to server
-          await onReviewBundle(
-            id,
-            "DISEMAK",
-            bulkComment || "Disemak dan disahkan secara pukal.",
-            bulkSignature,
-            bulkReviewerInfo.name,
-            rasmiPdfBase64
-          );
-          
-          console.log(`[BULK] Data ulasan berjaya dihantar untuk ${bundle.teacherName}, menghantar ke GAS...`);
-          
-          // 5. Wait 8 seconds before processing the next item to give GAS time to finish
-          if (i < selectedBundleIds.length - 1) {
-            console.log(`[BULK] Menunggu 8 saat sebelum memproses hantaran seterusnya...`);
-            await new Promise(resolve => setTimeout(resolve, 8000));
-          }
-        } catch (err) {
-          console.error(`Error processing bundle ${id}:`, err);
-          showNotification(`Ralat semasa memproses ${bundle.teacherName}. Sistem akan teruskan dengan yang lain.`, 'error');
+      const comment = bulkComment || "Disemak dan disahkan secara pukal.";
+      if (onReviewBundles) {
+        // Firebase: semua hantaran dalam SATU batch — beberapa saat sahaja
+        await onReviewBundles(selectedBundleIds, "DISEMAK", comment, bulkSignature, bulkReviewerInfo.name, bulkReviewerInfo.designation,
+          (done, total) => setBulkProgress({ current: done, total }));
+      } else {
+        for (let i = 0; i < selectedBundleIds.length; i++) {
+          setBulkProgress({ current: i + 1, total: selectedBundleIds.length });
+          await onReviewBundle(selectedBundleIds[i], "DISEMAK", comment, bulkSignature, bulkReviewerInfo.name, undefined, bulkReviewerInfo.designation);
         }
       }
 
-      showNotification(`✅ Berjaya mengesahkan ${selectedBundleIds.length} hantaran dengan penjanaan PDF lengkap.`, 'success');
+      showNotification(`✅ ${selectedBundleIds.length} hantaran disahkan & disimpan ke Firebase.`, 'success');
       setShowBulkModal(false);
       setSelectedBundleIds([]);
       setBulkComment('');
@@ -1278,9 +1231,10 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                       return (
                                         <a 
                                           key={bIdx}
-                                          href={bundle.linkPdfSelesai || bundle.jana_url}
+                                          href={bundle.linkPdfSelesai || bundle.jana_url || '#'}
                                           target="_blank"
                                           rel="noopener noreferrer"
+                                          onClick={ev => { if (!(bundle.linkPdfSelesai || bundle.jana_url) && onViewBundle) { ev.preventDefault(); onViewBundle(bundle); } }}
                                           className="w-7 h-7 flex items-center justify-center bg-white text-slate-600 rounded-lg text-[10px] font-bold hover:bg-indigo-600 hover:text-white transition-all border border-slate-200 hover:border-indigo-600 shadow-sm"
                                           title={`Muat Turun Minggu ${weekNum}`}
                                         >

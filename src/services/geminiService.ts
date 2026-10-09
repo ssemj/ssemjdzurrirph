@@ -9,11 +9,15 @@ import { DskpRow } from "../types";
 
 export const DEFAULT_GEMINI_MODEL = "gemini-flash-latest";
 
+// Boleh dijalankan di pelayar (localStorage) atau Node/Cloud Function (process.env).
+let runtimeKey = "";
+export const setGeminiKey = (k: string) => { runtimeKey = k || ""; };
+const ls = (k: string) => { try { return typeof localStorage !== "undefined" ? localStorage.getItem(k) : null; } catch { return null; } };
 export const getGeminiKey = (): string =>
-  localStorage.getItem("gemini_api_key") || (process.env.GEMINI_API_KEY as string) || "";
+  runtimeKey || ls("gemini_api_key") || (process.env.GEMINI_API_KEY as string) || "";
 
 export const getGeminiModel = (): string =>
-  localStorage.getItem("gemini_model") || DEFAULT_GEMINI_MODEL;
+  ls("gemini_model") || DEFAULT_GEMINI_MODEL;
 
 const client = () => {
   const apiKey = getGeminiKey();
@@ -32,7 +36,7 @@ const isTransient = (e: any) => {
 const isModelMissing = (e: any) => /\b(404|NOT_FOUND)\b|is not found|not supported/i.test(String(e?.message || e));
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
-async function generateWithFallback(
+export async function generateWithFallback(
   params: Omit<Parameters<GoogleGenAI["models"]["generateContent"]>[0], "model">,
   onProgress?: (msg: string) => void
 ) {
@@ -58,7 +62,7 @@ async function generateWithFallback(
   );
 }
 
-const fileToBase64 = (file: Blob): Promise<string> =>
+export const fileToBase64 = (file: Blob): Promise<string> =>
   new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result).split(",")[1] || "");
@@ -66,7 +70,7 @@ const fileToBase64 = (file: Blob): Promise<string> =>
     reader.readAsDataURL(file);
   });
 
-const parseJson = <T,>(text: string | undefined): T => {
+export const parseJson = <T,>(text: string | undefined): T => {
   const raw = (text || "").trim().replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
   try {
     return JSON.parse(raw) as T;

@@ -2,7 +2,16 @@ import { db } from "./firebaseConfig";
 
 import { collection, addDoc, serverTimestamp, getDocs, query, where, orderBy, limit, doc, setDoc } from "firebase/firestore";
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { UserProfile, UserRole, ERPHData, ERPHStatus, MasterData, Resource, WeeklyBundle, AppNotification, ScheduleSlot, DskpDocument, AcademicCalendar } from './types';
+import { UserProfile, UserRole, ERPHData, ERPHStatus, MasterData, Resource, WeeklyBundle, AppNotification, ScheduleSlot, DskpDocument, AcademicCalendar, RptDocument, TeacherTimetable } from './types';
+import { loadTimetable, saveTimetable, DEFAULT_AUTOPILOT } from './services/timetableService';
+import { loadAllRpt } from './services/rptService';
+import { BundleReviewDoc, loadBundleReviews, loadSignatures, overlayBundles, overlayErphs, parseRphIds, reviewBundlesFs, saveSubmissionFs } from './services/reviewService';
+import { runAutoRph } from './services/autoRphRunner';
+import { dayNameOf as dayNameOfDate, autoErphId as autoErphIdOf } from './services/autoRphCore';
+import { getGeminiKey } from './services/geminiService';
+import type { AutoResult } from './services/autoRphGenerate';
+import AutoRphTodayCard, { AutoRunState } from './components/AutoRphTodayCard';
+import type { CenterTab } from './components/AutoRphCenter';
 import { DEFAULT_MASTER_DATA, WEEKS, sortSubjects } from './constants';
 import { loadAllDskp, mergeDskpIntoMasterData } from './services/dskpService';
 import { loadCalendar } from './services/calendarService';
@@ -23,6 +32,7 @@ const Timetable = React.lazy(() => import('./components/Timetable'));
 const Pencerapan = React.lazy(() => import('./components/Pencerapan'));
 const RekodPencerapan = React.lazy(() => import('./components/RekodPencerapan'));
 const MasterDataManager = React.lazy(() => import('./components/MasterDataManager'));
+const AutoRphCenter = React.lazy(() => import('./components/AutoRphCenter'));
 
 // Tulis ke Firebase di latar belakang — JANGAN tunggu, supaya simpanan ke Google Sheet (sumber utama)
 // tidak tersekat bila Firebase lambat atau luar talian.
@@ -48,7 +58,7 @@ const ADMIN_ORDER = [
 const App: React.FC = () => {
   const [user, setUser] = useState<UserProfile | null>(null);
   const [adminUser, setAdminUser] = useState<UserProfile | null>(null);
-  const [view, setView] = useState<'DASHBOARD' | 'FORM' | 'ADMIN' | 'REGISTER' | 'PREVIEW' | 'CALENDAR' | 'RPT' | 'ANALYSIS' | 'TEXTBOOKS' | 'DSKP_COLL' | 'CHAT' | 'SETTINGS' | 'TIMETABLE' | 'PENCERAPAN' | 'REKOD_PENCERAPAN' | 'MASTER_DATA_MANAGER'>('REGISTER');
+  const [view, setView] = useState<'DASHBOARD' | 'FORM' | 'ADMIN' | 'REGISTER' | 'PREVIEW' | 'CALENDAR' | 'RPT' | 'ANALYSIS' | 'TEXTBOOKS' | 'DSKP_COLL' | 'CHAT' | 'SETTINGS' | 'TIMETABLE' | 'PENCERAPAN' | 'REKOD_PENCERAPAN' | 'MASTER_DATA_MANAGER' | 'AUTO_RPH'>('REGISTER');
   const [allErphs, setAllErphs] = useState<ERPHData[]>([]);
   const [bundles, setBundles] = useState<WeeklyBundle[]>([]);
   const [masterData, setMasterData] = useState<MasterData>(DEFAULT_MASTER_DATA);
@@ -104,6 +114,31 @@ const App: React.FC = () => {
   const showNotification = useCallback((message: string, type: 'success' | 'error' | 'info' = 'info') => {
     setNotification({ message, type });
     setTimeout(() => setNotification(null), 5000);
+  }, []);
+
+  // ===== RPH AUTOMATIK: Jadual (Firestore timetables/{id}) + RPT (Firestore rpt) =====
+  const [rptDocs, setRptDocs] = useState<RptDocument[]>([]);
+  const [timetable, setTimetable] = useState<TeacherTimetable | null>(null);
+  const [centerTab, setCenterTab] = useState<CenterTab>('JADUAL');
+  const [autoRun, setAutoRun] = useState<AutoRunState>({ running: false, message: '', done: 0, total: 0 });
+  const [autoResults, setAutoResults] = useState<AutoResult[]>([]);
+  // RPH / slot yang dipadam guru (status DELETED di Firebase) — tidak dipapar & tidak dijana semula oleh AI
+  const [deletedErphs, setDeletedErphs] = useState<ERPHData[]>([]);
+  // ===== SEMAKAN (Firebase weekly_bundles) — mengatasi status dari Google Sheet =====
+  const [fsReviews, setFsReviews] = useState<BundleReviewDoc[]>([]);
+  const [signatures, setSignatures] = useState<Record<string, string>>({});
+  const [overlayTick, setOverlayTick] = useState(0);
+  const reloadReviews = useCallback(async (u: UserProfile | null) => {
+    if (!u) return;
+    try {
+      const list = await loadBundleReviews(u.role === UserRole.ADMIN ? { days: 200 } : { teacherId: u.id });
+      setSignatures(await loadSignatures(list.map(r => r.signatureId || '')));
+      setFsReviews(list);
+      setOverlayTick(t => t + 1);
+    } catch (e) { console.warn('Gagal memuatkan semakan Firebase:', e); }
+  }, []);
+  const reloadRpt = useCallback(async () => {
+    try { setRptDocs(await loadAllRpt()); } catch (e) { console.warn('Gagal memuatkan RPT:', e); }
   }, []);
 
   const handleSaveSchedule = async (schedule: ScheduleSlot[]) => {
@@ -323,6 +358,7 @@ const App: React.FC = () => {
     setSyncStatus('SYNCING');
     try {
       // --- START FIREBASE INJECTION (READ PANTAS) ---
+      let fbRecords: ERPHData[] = [];
       if (user) {
         try {
           // Cari 30 rekod RPH terbaru milik cikgu dari Firebase
@@ -330,13 +366,15 @@ const App: React.FC = () => {
             collection(db, "erph_records"), 
             where("teacherId", "==", user.id),
             orderBy("createdAt", "desc"),
-            limit(30)
+            limit(500)
           );
           const snapshot = await getDocs(q);
           const fbData = snapshot.docs.map(doc => ({ ...doc.data() } as ERPHData));
           
           if (fbData.length > 0) {
             // Tapis yang status DELETED (supaya selari dengan logik GAS cikgu)
+            fbRecords = fbData;
+            setDeletedErphs(fbData.filter(e => (e as any).status === 'DELETED'));
             const activeFbData = fbData.filter(e => (e as any).status !== 'DELETED');
             setAllErphs(activeFbData);
             console.log("🚀 Data Firebase berjaya dimuatkan!");
@@ -370,7 +408,11 @@ const App: React.FC = () => {
           });
         }
         if (data.erphs) {
-          const activeErphs = data.erphs.filter((e: ERPHData) => (e as any).status !== 'DELETED');
+          // Gabung: rekod Google Sheet + rekod Firebase yang belum sampai ke Sheet (cth RPH auto-jana Cloud Function)
+          const merged = new Map<string, ERPHData>();
+          (data.erphs as ERPHData[]).forEach(e => merged.set(e.id, e));
+          fbRecords.forEach(e => { if (!merged.has(e.id)) merged.set(e.id, e); else if ((e as any).status === 'DELETED') merged.set(e.id, e); });
+          const activeErphs = Array.from(merged.values()).filter((e: ERPHData) => (e as any).status !== 'DELETED');
           setAllErphs(activeErphs);
         }
         
@@ -509,6 +551,7 @@ const App: React.FC = () => {
           setBundles(processedBundles);
         }
         setSyncStatus('IDLE');
+        reloadReviews(user);   // semakan Firebase digabung SELEPAS data Google Sheet
       } else {
         console.error("Sync returned non-success status:", data);
         setSyncStatus('OFFLINE');
@@ -517,7 +560,7 @@ const App: React.FC = () => {
       console.error("Sync Error:", error);
       setSyncStatus('OFFLINE'); 
     }
-  }, [user, readNotifIds, locallyReviewedIds]);
+  }, [user, readNotifIds, locallyReviewedIds, reloadReviews]);
 
   useEffect(() => {
     const savedUser = localStorage.getItem('ssemj_user');
@@ -539,8 +582,114 @@ const App: React.FC = () => {
   useEffect(() => { loadBranding(); }, []);
 
   useEffect(() => {
-    if (user) { reloadDskp(); reloadCalendar(); }
-  }, [user?.id, reloadDskp, reloadCalendar]);
+    if (user) { reloadDskp(); reloadCalendar(); reloadRpt(); }
+  }, [user?.id, reloadDskp, reloadCalendar, reloadRpt]);
+
+  // Muat jadual waktu guru dari Firestore; jika tiada, guna jadual lama (localStorage / Google Sheet)
+  useEffect(() => {
+    if (!user) { setTimetable(null); return; }
+    let cancelled = false;
+    const fallback = (): TeacherTimetable => ({
+      teacherId: user.id, teacherName: user.name, autoPilot: { ...DEFAULT_AUTOPILOT },
+      slots: masterSchedule.filter(s => s.teacherId === user.id),
+    });
+    loadTimetable(user.id)
+      .then(tt => { if (!cancelled) setTimetable(tt && tt.slots.length ? tt : { ...fallback(), autoPilot: tt?.autoPilot || fallback().autoPilot }); })
+      .catch(() => { if (!cancelled) setTimetable(fallback()); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]);
+
+  // Jadual lama dari Google Sheet tiba selepas jadual Firestore (kosong) → guna jadual lama
+  useEffect(() => {
+    if (!user || !timetable || timetable.updatedAt || timetable.slots.length) return;
+    const mine = masterSchedule.filter(s => s.teacherId === user.id);
+    if (mine.length) setTimetable(tt => tt && { ...tt, slots: mine });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [masterSchedule, timetable?.updatedAt]);
+
+  const handleSaveTimetable = async (tt: TeacherTimetable) => {
+    if (!user) return;
+    const next = { ...tt, teacherId: user.id, teacherName: user.name, slots: tt.slots.map(s => ({ ...s, teacherId: user.id })) };
+    await saveTimetable(next);
+    setTimetable({ ...next, updatedAt: new Date().toISOString() });
+    // Selaraskan dengan jadual sedia ada (editor mingguan & Google Sheet)
+    setMasterSchedule(prev => {
+      const merged = [...prev.filter(s => s.teacherId !== user.id), ...next.slots];
+      localStorage.setItem('ssemj_master_schedule', JSON.stringify(merged));
+      return merged;
+    });
+    handleSaveSchedule(next.slots);
+    showNotification('✅ Jadual waktu disimpan ke Firebase', 'success');
+  };
+
+  // Simpan RPH auto-jana: Firebase (ditunggu) + Google Sheet, tanpa sync penuh setiap rekod
+  const saveErphQuiet = async (data: ERPHData) => {
+    setAllErphs(prev => {
+      const updated = prev.filter(e => e.id !== data.id);
+      updated.push(data);
+      return updated;
+    });
+    try { await setDoc(doc(db, "erph_records", data.id), { ...data, createdAt: serverTimestamp(), source: "Auto_RPH_AI" }); }
+    catch (e) { console.error("FB auto-RPH gagal:", e); }
+    const { reviewSignature, ...payloadData } = data;
+    fetch(GAS_WEB_APP_URL, {
+      method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ ...payloadData, logType: "RPH_RECORD" })
+    }).catch(() => {});
+  };
+
+  const allErphsRef = useRef<ERPHData[]>([]);
+  useEffect(() => { allErphsRef.current = allErphs; }, [allErphs]);
+  const autoRunningRef = useRef(false);
+  const deletedErphsRef = useRef<ERPHData[]>([]);
+  useEffect(() => { deletedErphsRef.current = deletedErphs; }, [deletedErphs]);
+  const autoStopRef = useRef(false);
+  const stopAuto = () => { autoStopRef.current = true; setAutoRun(r => ({ ...r, message: 'Menghentikan... (menunggu kelas semasa)' })); };
+
+  const runAuto = useCallback(async (mode: 'AUTO_24J' | 'TRIGGER' | 'WEEK', date?: string, regenerate = false) => {
+    if (!user || !timetable || autoRunningRef.current) return;
+    if (!timetable.slots.length) { if (mode === 'TRIGGER') showNotification('Sila rekod jadual waktu dahulu.', 'error'); return; }
+    autoRunningRef.current = true;
+    autoStopRef.current = false;
+    setAutoRun({ running: true, message: 'Menyediakan...', done: 0, total: 0 });
+    try {
+      const report = await runAutoRph({
+        mode, date, regenerateAutoDrafts: regenerate,
+        teacherId: user.id, teacherName: user.name,
+        slots: timetable.slots, settings: timetable.autoPilot, calendar: academicCalendar,
+        rptDocs, dskpDocs, erphs: [...allErphsRef.current, ...deletedErphsRef.current],
+        save: saveErphQuiet,
+        shouldStop: () => autoStopRef.current,
+        onProgress: (message, done, total) => setAutoRun({ running: true, message, done, total }),
+      });
+      setAutoResults(report.results);
+      if (report.created > 0) showNotification(`🤖 ${report.created} RPH dijana oleh AI${report.skipped ? ` • ${report.skipped} dilangkau` : ''}`, 'success');
+      else if (autoStopRef.current) showNotification('Penjanaan dihentikan. Guru boleh jana secara manual.', 'info');
+      else if (mode !== 'AUTO_24J') {
+        const why = report.results.find(r => r.status === 'SKIPPED' || r.status === 'ERROR')?.message;
+        showNotification(report.results.every(r => r.status === 'EXISTS') && report.results.length ? 'Semua RPH tarikh ini sudah tersedia.' : `Tiada RPH dijana. ${why || ''}`, 'info');
+      }
+    } catch (e: any) {
+      if (mode !== 'AUTO_24J') showNotification(e.message || 'Gagal menjana RPH', 'error');
+      console.warn('Auto-RPH:', e);
+    } finally {
+      autoRunningRef.current = false;
+      setAutoRun({ running: false, message: '', done: 0, total: 0 });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, timetable, academicCalendar, rptDocs, dskpDocs]);
+
+  // Auto-jana 24 jam sebelum kelas: semasa aplikasi dibuka & setiap 30 minit
+  const runAutoRef = useRef(runAuto);
+  useEffect(() => { runAutoRef.current = runAuto; }, [runAuto]);
+  const autoReady = !!(user && user.role === UserRole.GURU && !adminUser && timetable?.autoPilot.enabled && timetable.slots.length && academicCalendar);
+  useEffect(() => {
+    if (!autoReady || !getGeminiKey()) return;
+    const first = setTimeout(() => runAutoRef.current('AUTO_24J'), 10000);
+    const every = setInterval(() => runAutoRef.current('AUTO_24J'), 30 * 60 * 1000);
+    return () => { clearTimeout(first); clearInterval(every); };
+  }, [autoReady, user?.id]);
 
   useEffect(() => {
     const hasUnappliedRead = notifications.some(n => {
@@ -622,9 +771,23 @@ const App: React.FC = () => {
     }
   };
 
+  /** Padam slot jadual untuk satu tarikh (tiada RPH) — simpan "batu nisan" supaya AI tidak menjananya. */
+  const handleSkipSlot = async (data: ERPHData) => {
+    if (!user) return;
+    const id = autoErphIdOf(user.id, data.date, data.startTime, data.classTitle || '', data.subject);
+    const tomb = { ...data, id, teacherId: user.id, teacherName: user.name, status: 'DELETED' } as any as ERPHData;
+    setDeletedErphs(prev => [...prev.filter(e => e.id !== id), tomb]);
+    try { await setDoc(doc(db, "erph_records", id), { ...tomb, deletedAt: serverTimestamp(), createdAt: serverTimestamp(), source: "Padam_Slot" }); }
+    catch (e) { console.error("Padam slot gagal:", e); }
+    showNotification('Slot dipadam untuk tarikh ini', 'info');
+  };
+
   const handleDeleteERPH = async (id: string) => {
     const erphToDelete = allErphs.find(e => e.id === id);
     if (!erphToDelete) return;
+    setDeletedErphs(prev => [...prev.filter(e => e.id !== id), { ...erphToDelete, status: 'DELETED' } as any]);
+    // RPH manual bagi slot jadual: tanda juga ID automatik supaya AI tidak menjana semula slot ini
+    if (user && !String(id).startsWith('AUTO_') && erphToDelete.date && erphToDelete.startTime) handleSkipSlot(erphToDelete);
 
     const updated = allErphs.filter(e => e.id !== id);
     setAllErphs(updated);
@@ -654,8 +817,10 @@ const App: React.FC = () => {
 
   const handleBulkSubmitWeek = async (week: number, existingPdfBase64?: string) => {
     if (!user) return;
-    const weekRPHs = allErphs.filter(e => e.teacherId === user.id && e.week === week);
+    const weekRPHs = weekBundleRphs(week);   // Isnin → Isnin minggu hadapan
     if (weekRPHs.length === 0) return;
+    // Tandakan Isnin minggu hadapan sebagai sudah dihantar bersama minggu ini
+    weekRPHs.filter(e => Number(e.week) === Number(week) + 1).forEach(e => { saveErphQuiet({ ...e, bundledInWeek: week, status: ERPHStatus.SELESAI }); });
 
     setIsProcessingBundle(true);
     try {
@@ -670,13 +835,10 @@ const App: React.FC = () => {
         pdfBase64: existingPdfBase64
       };
 
-      try {
-        fbBackground(addDoc(collection(db, "weekly_submissions"), {
-          ...payload,
-          createdAt: serverTimestamp(),
-          status: 'PENDING_REVIEW'
-        }));
-      } catch (fbErr) { console.error("FB Bulk Submit Gagal:", fbErr); }
+      // Hantaran direkod di Firebase (weekly_bundles) — pentadbir terus nampak tanpa tunggu Google Sheet
+      const fsDoc = { id_minggu, teacherId: user.id, teacherName: user.name, week: `Minggu ${week}`, rphIds: weekRPHs.map(r => r.id) };
+      fbBackground(saveSubmissionFs(fsDoc));
+      setFsReviews(prev => [...prev.filter(r => r.id_minggu !== id_minggu), { ...fsDoc, rphIds: JSON.stringify(fsDoc.rphIds), status_proses: 'PENDING', timestamp: new Date().toISOString(), fsUpdatedAt: new Date().toISOString() }]);
 
       await fetch(GAS_WEB_APP_URL, {
         method: 'POST', mode: 'no-cors',
@@ -694,7 +856,75 @@ const App: React.FC = () => {
     } finally { setIsProcessingBundle(false); }
   };
 
-  const handleReviewBundle = (bundleId: string, status: string, comment: string, signature: string, reviewedBy: string, reviewedPdfBase64?: string) => {
+  // ===== SEMAKAN PENTADBIR → FIREBASE (satu batch, tiada PDF / GAS) =====
+  const bundleRphIdsOf = (b: WeeklyBundle): string[] => {
+    const ids = parseRphIds(b.rphIds);
+    if (ids.length) return ids;
+    const w = parseInt(String(b.week).replace(/[^0-9]/g, ''), 10);
+    return allErphs.filter(e => Number(e.week) === w && (
+      (b.teacherId && String(e.teacherId).trim() === String(b.teacherId).trim()) ||
+      String(e.teacherName || '').trim().toLowerCase() === String(b.teacherName || '').trim().toLowerCase())).map(e => e.id);
+  };
+
+  const notifyQuiet = (message: string, recipientId: string) => {
+    if (!user) return;
+    const n: AppNotification = { id: `NOTIF_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`, senderId: user.id, senderName: user.name, message, timestamp: new Date().toISOString(), type: 'SYSTEM', read: false, recipientId };
+    fbBackground(addDoc(collection(db, "app_notifications"), { ...n, createdAt: serverTimestamp() }));
+    // Notifikasi kecil ke Google Sheet (tanpa PDF) supaya guru nampak di loceng
+    fetch(GAS_WEB_APP_URL, { method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ ...n, logType: "NOTIFICATION" }) }).catch(() => {});
+  };
+
+  const handleReviewBundles = async (
+    bundleIds: string[], status: string, comment: string, signature: string, reviewedBy: string,
+    reviewerDesignation = '', onProgress?: (done: number, total: number) => void,
+  ) => {
+    const items = bundleIds.map(id => bundles.find(b => b.id_minggu === id)).filter(Boolean)
+      .map(b => ({ bundle: b as WeeklyBundle, rphIds: bundleRphIdsOf(b as WeeklyBundle) }));
+    if (!items.length) return;
+    setSyncStatus('SYNCING');
+    const { signatureId, reviewedAt } = await reviewBundlesFs(items, { status, comment, signature, reviewedBy, reviewerDesignation }, onProgress);
+    // Kemas kini paparan serta-merta
+    setSignatures(prev => ({ ...prev, [signatureId]: signature }));
+    setFsReviews(prev => {
+      const map = new Map(prev.map(r => [r.id_minggu, r]));
+      items.forEach(({ bundle: b, rphIds }) => map.set(b.id_minggu, {
+        id_minggu: b.id_minggu, teacherId: b.teacherId || '', teacherName: b.teacherName || '', week: b.week || '',
+        rphIds: JSON.stringify(rphIds), status_proses: status, timestamp: b.timestamp, comment, reviewedBy, reviewerDesignation,
+        reviewedAt, signatureId, fsUpdatedAt: reviewedAt,
+      }));
+      return Array.from(map.values());
+    });
+    setOverlayTick(t => t + 1);
+    setLocallyReviewedIds(prev => { const n = new Set(prev); items.forEach(i => n.add(i.bundle.id_minggu)); return n; });
+    setSyncStatus('IDLE');
+    // Notifikasi guru di latar belakang (berperingkat, tidak menyekat)
+    items.forEach(({ bundle: b }, i) => b.teacherId && setTimeout(() => notifyQuiet(`RPH anda untuk ${b.week} telah disemak oleh ${reviewedBy}.`, b.teacherId), i * 400));
+  };
+
+  // Gabung semakan Firebase ke hantaran & RPH (selepas setiap sync / semakan)
+  useEffect(() => {
+    if (!fsReviews.length) return;
+    setBundles(prev => overlayBundles(prev, fsReviews));
+    setAllErphs(prev => overlayErphs(prev, fsReviews, signatures));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [overlayTick, signatures]);
+
+  /** Buka RPH bagi satu hantaran (PDF rasmi dijana semula daripada data + tandatangan). */
+  const openBundlePreview = (b: WeeklyBundle) => {
+    const ids = new Set(bundleRphIdsOf(b));
+    const list = allErphs.filter(e => ids.has(e.id)).sort((a, c) => String(a.date).localeCompare(String(c.date)) || String(a.startTime).localeCompare(String(c.startTime)));
+    if (!list.length) { showNotification('Rekod RPH bagi hantaran ini tidak ditemui.', 'error'); return; }
+    setPreviewErphs(list);
+    setView('PREVIEW');
+  };
+
+  /** Semakan satu hantaran → Firebase. (reviewedPdfBase64 diabaikan: PDF dijana semula bila dibuka) */
+  const handleReviewBundle = async (bundleId: string, status: string, comment: string, signature: string, reviewedBy: string, _pdf?: string, reviewerDesignation = '') => {
+    await handleReviewBundles([bundleId], status, comment, signature, reviewedBy, reviewerDesignation);
+  };
+
+  /** @deprecated (laluan lama GAS — tidak digunakan lagi) */
+  const handleReviewBundleLegacy = (bundleId: string, status: string, comment: string, signature: string, reviewedBy: string, reviewedPdfBase64?: string) => {
     const bundle = bundles.find(b => b.id_minggu === bundleId);
     if (status === "DISEMAK") {
       setLocallyReviewedIds(prev => new Set(prev).add(bundleId));
@@ -909,13 +1139,23 @@ const App: React.FC = () => {
   };
 
   // --- PREVIEW SEMINGGU (digunakan oleh dashboard & editor mingguan) ---
+  // ===== Hantaran mingguan ISNIN → ISNIN =====
+  // Minggu N = RPH minggu N (kecuali Isnin yang sudah dihantar bersama minggu N-1) + RPH Isnin minggu N+1
+  const isMondayRph = (e: ERPHData) => String(e.day || '').trim().toUpperCase() === 'ISNIN' || (!!e.date && dayNameOfDate(e.date) === 'ISNIN');
+  const weekBundleRphs = (week: number): ERPHData[] => {
+    if (!user) return [];
+    const mine = allErphs.filter(e =>
+      (String(e.teacherId || "").trim().toLowerCase() === String(user.id || "").trim().toLowerCase()) ||
+      (String(e.teacherName || "").trim().toLowerCase() === String(user.name || "").trim().toLowerCase()));
+    const byTime = (a: ERPHData, b: ERPHData) => String(a.date).localeCompare(String(b.date)) || String(a.startTime).localeCompare(String(b.startTime));
+    const thisWeek = mine.filter(e => Number(e.week) === Number(week) && !(isMondayRph(e) && Number(e.bundledInWeek) === Number(week) - 1)).sort(byTime);
+    const nextMonday = mine.filter(e => Number(e.week) === Number(week) + 1 && isMondayRph(e)).sort(byTime);
+    return [...thisWeek, ...nextMonday];
+  };
+
   const openWeekPreview = (week: number) => {
     if (!user) return;
-    const weekRPHs = allErphs.filter(e =>
-      ((String(e.teacherId || "").trim().toLowerCase() === String(user.id || "").trim().toLowerCase()) ||
-       (String(e.teacherName || "").trim().toLowerCase() === String(user.name || "").trim().toLowerCase())) &&
-      Number(e.week) === Number(week)
-    );
+    const weekRPHs = weekBundleRphs(week);
     setPreviewErphs(weekRPHs);
     setView('PREVIEW');
   };
@@ -1257,6 +1497,7 @@ const App: React.FC = () => {
           onShare={handleShareERPH}
           onDelete={handleDeleteERPH}
           onViewWeek={openWeekPreview}
+          onViewBundle={openBundlePreview}
           onDskpUpdated={reloadDskp}
           onShareWeek={handleShareWeek}
           onBulkSubmit={handleBulkSubmitWeek}
@@ -1312,8 +1553,48 @@ const App: React.FC = () => {
             } as ERPHData);
             setView('FORM');
           }}
-          onNavigate={(v) => setView(v as any)}
+          onNavigate={(v) => { if (v === 'AUTO_RPH' || v === 'TIMETABLE') setCenterTab(v === 'TIMETABLE' ? 'JADUAL' : 'AUTO'); setView(v === 'TIMETABLE' ? 'AUTO_RPH' : v as any); }}
           notifications={notifications}
+          topSlot={timetable && (
+            <AutoRphTodayCard
+              teacherId={user.id}
+              slots={timetable.slots}
+              erphs={allErphs}
+              calendar={academicCalendar}
+              autoPilot={timetable.autoPilot}
+              hasGeminiKey={!!getGeminiKey()}
+              run={autoRun}
+              onTrigger={(d) => runAuto('TRIGGER', d)}
+              onGenerateWeek={(d) => runAuto('WEEK', d)}
+              onStop={stopAuto}
+              onOpenCenter={(t) => { setCenterTab(t); setView('AUTO_RPH'); }}
+              onOpenErph={(erph) => { setEditingErph(erph); setEditorWeek(undefined); setView('FORM'); }}
+            />
+          )}
+        />
+      )}
+
+      {user && (view === 'AUTO_RPH' || view === 'TIMETABLE') && timetable && (
+        <AutoRphCenter
+          user={user}
+          isAdmin={user.role === UserRole.ADMIN || !!adminUser}
+          initialTab={view === 'TIMETABLE' ? 'JADUAL' : centerTab}
+          masterData={effectiveMasterData}
+          dskpDocs={dskpDocs}
+          rptDocs={rptDocs}
+          onRptUpdated={reloadRpt}
+          timetable={timetable}
+          onSaveTimetable={handleSaveTimetable}
+          erphs={allErphs}
+          calendar={academicCalendar}
+          run={autoRun}
+          lastResults={autoResults}
+          onTrigger={(d, regen) => runAuto('TRIGGER', d, regen)}
+          onRunWindow={() => runAuto('AUTO_24J')}
+          onGenerateWeek={(d) => runAuto('WEEK', d)}
+          onStop={stopAuto}
+          onOpenErph={(erph) => { setEditingErph(erph); setEditorWeek(undefined); setView('FORM'); }}
+          onBack={() => setView(user.role === UserRole.ADMIN ? 'ADMIN' : 'DASHBOARD')}
         />
       )}
 
@@ -1322,6 +1603,13 @@ const App: React.FC = () => {
           user={user}
           masterData={effectiveMasterData}
           dskpDocs={dskpDocs}
+          rptDocs={rptDocs}
+          autoRun={autoRun}
+          onGenerateWeek={(d) => runAuto('WEEK', d)}
+          onStopAuto={stopAuto}
+          deletedErphs={deletedErphs}
+          onDelete={handleDeleteERPH}
+          onSkipSlot={handleSkipSlot}
           erphs={allErphs}
           masterSchedule={masterSchedule}
           initialErph={editingErph}
@@ -1347,6 +1635,8 @@ const App: React.FC = () => {
             if (erph) handleSaveERPH({ ...erph, status, reviewComment: comment, reviewSignature: signature, reviewedAt: new Date().toISOString() });
           }}
           onReviewBundle={handleReviewBundle}
+          onReviewBundles={handleReviewBundles}
+          onViewBundle={openBundlePreview}
           onSyncMaster={handleSyncMaster}
           onRefresh={handleSyncCloud}
           onLogout={handleLogout} // Pass the handleLogout function
@@ -1404,7 +1694,8 @@ const App: React.FC = () => {
         />
       )}
 
-      {user && view === 'TIMETABLE' && (
+ {/* Jadual lama digantikan oleh Pusat RPH Automatik (tab Jadual Waktu) */}
+      {false && user && view === 'TIMETABLE' && (
         <Timetable 
           user={user}
           schedule={masterSchedule}

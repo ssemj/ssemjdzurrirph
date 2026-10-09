@@ -1,7 +1,8 @@
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { UserProfile, ERPHData, ERPHStatus, MasterData, ScheduleSlot, DskpDocument } from '../types';
+import { UserProfile, ERPHData, ERPHStatus, MasterData, ScheduleSlot, DskpDocument, RptDocument } from '../types';
+import { planLesson, lessonPosition, findRptDoc, findDskpDoc, lastSpFor, normDay, isFutureWeek } from '../services/autoRphCore';
 import { generateErphContent, getGeminiKey, convertToJawi, subjectLanguage, effectiveLanguage, isManagementSubject, MGMT_SK, MGMT_TAJUK, MGMT_SP_FALLBACK, describeManagementSk } from '../services/geminiService';
 import { findDskpRows, getFormOptions, splitField, joinField } from '../services/dskpService';
 import { WEEKS, LANGUAGES } from '../constants';
@@ -27,9 +28,13 @@ interface ERPHFormProps {
   embedded?: boolean;
   /** 'close' = kembali ke senarai RPH; 'next' = kekal & pergi ke slot seterusnya */
   onSaved?: (data: ERPHData, mode: 'close' | 'next') => void;
+  /** RPT (Firestore) — untuk isi automatik Tajuk/Bidang/SK/SP */
+  rptDocs?: RptDocument[];
+  /** true = slot kosong diisi automatik (RPT/DSKP + Gemini) sebaik dibuka */
+  autoFill?: boolean;
 }
 
-const ERPHForm: React.FC<ERPHFormProps> = ({ user, onSave, onCancel, masterData, erphs = [], masterSchedule = [], initialData, dskpDocs = [], embedded = false, onSaved }) => {
+const ERPHForm: React.FC<ERPHFormProps> = ({ user, onSave, onCancel, masterData, erphs = [], masterSchedule = [], initialData, dskpDocs = [], embedded = false, onSaved, rptDocs = [], autoFill = true }) => {
   const bbmOptions = masterData.bbmOptions || [
     'Buku Teks',
     'Nota',
@@ -343,6 +348,19 @@ const ERPHForm: React.FC<ERPHFormProps> = ({ user, onSave, onCancel, masterData,
   );
   const [aiExtraNotes, setAiExtraNotes] = useState('');
 
+  // ---- Henti jana / had masa: hasil Gemini yang lewat diabaikan ----
+  const genTokenRef = useRef(0);
+  const AI_TIMEOUT_MS = 90000;
+  const withAiTimeout = <T,>(p: Promise<T>) => Promise.race([p,
+    new Promise<T>((_, rej) => setTimeout(() => rej(new Error('Gemini mengambil masa terlalu lama (lebih 90 saat). Tekan JANA AI untuk cuba semula.')), AI_TIMEOUT_MS))]);
+  const stopGeneration = () => {
+    genTokenRef.current++;
+    setLoading(false);
+    setAutoMsg('⏹ Penjanaan dihentikan. Anda boleh isi sendiri atau tekan JANA AI untuk cuba semula.');
+  };
+  /** Minggu hadapan (cth Isnin depan dalam hantaran Isnin→Isnin): refleksi dikosongkan. */
+  const noReflection = isFutureWeek(String(formData.date || ''));
+
   const handleBulkAiGenerate = async () => {
     if (!getGeminiKey()) { alert('Sila masukkan Kunci API Gemini di halaman Tetapan terlebih dahulu.'); return; }
 
@@ -351,10 +369,12 @@ const ERPHForm: React.FC<ERPHFormProps> = ({ user, onSave, onCancel, masterData,
       return;
     }
     setLoading(true);
+    const token = ++genTokenRef.current;
+    setAutoMsg('✨ Gemini sedang menjana...');
     try {
       const toMin = (t?: string) => { const [h, m] = (t || '0:0').split(':').map(Number); return h * 60 + m; };
       const mins = toMin(formData.endTime) - toMin(formData.startTime);
-      const out = await generateErphContent({
+      const out = await withAiTimeout(generateErphContent({
         subject: formData.subject,
         form: formData.className,
         classTitle: formData.classTitle,
@@ -367,23 +387,102 @@ const ERPHForm: React.FC<ERPHFormProps> = ({ user, onSave, onCancel, masterData,
         duration: mins > 0 ? `${mins} minit` : undefined,
         extraNotes: aiExtraNotes || undefined,
         teacherSubjects: mgmtSubjects(),
-      });
+      }));
+      if (token !== genTokenRef.current) return;   // telah dihentikan
+      setAutoMsg(noReflection ? '✅ Dijana. Refleksi dikosongkan (RPH minggu hadapan).' : '✅ Dijana oleh Gemini AI.');
       setFormData(prev => ({
         ...prev,
         language: effectiveLanguage(formData.subject, formData.language),   // PI → JAWI, English → BI
         objective: out.objective,
         activities: out.activities,
-        reflection: out.reflection,
+        reflection: noReflection ? '' : out.reflection,
         bbm: 'Lain-lain (nyatakan)',
       }));
       setCustomBbm(out.bbm);
     } catch (error: any) {
+      if (token !== genTokenRef.current) return;
       console.error("Gemini AI Error:", error);
-      alert(`Gagal menjana kandungan AI (Gemini).\n\nPunca: ${error.message}`);
+      setAutoMsg(`⚠ Gagal menjana: ${String(error.message).slice(0, 160)}`);
     } finally {
-      setLoading(false);
+      if (token === genTokenRef.current) setLoading(false);
     }
   };
+
+  // ================= ISI AUTOMATIK: Jadual + RPT + DSKP → dropdown + Gemini =================
+  const [autoMsg, setAutoMsg] = useState('');
+  const autoDoneRef = useRef(false);
+  const codeOf = (t: string) => String(t || '').match(/^\s*(\d+(?:\.\d+)*)/)?.[1] || '';
+  const matchOpt = (list: string[], text: string) => {
+    const c = codeOf(text);
+    return (c && list.find(x => codeOf(x) === c)) || list.find(x => x.trim().toLowerCase() === text.trim().toLowerCase()) || text.trim();
+  };
+
+  const handleAutoFill = async (withAi = true) => {
+    if (!formData.subject || !formData.className) { alert('Pilih Mata Pelajaran dan Tingkatan dahulu.'); return; }
+    const rpt = findRptDoc(rptDocs, formData.subject, formData.className);
+    const dskp = findDskpDoc(dskpDocs, formData.subject, formData.className);
+    const mySlots = masterSchedule.filter(sl => sl.teacherId === user.id);
+    const slot = mySlots.find(sl => normDay(sl.day) === normDay(formData.day) && sl.startTime === formData.startTime
+      && String(sl.subject).toLowerCase() === String(formData.subject).toLowerCase());
+    const plan = planLesson({
+      rpt, dskp, week: Number(formData.week) || null,
+      position: slot ? lessonPosition(mySlots, slot) : { index: 0, total: 1 },
+      lastSp: slot ? lastSpFor(erphs, user.id, slot, formData.date || '') : undefined,
+    });
+    if (!plan) { setAutoMsg(`⚠ Tiada RPT atau DSKP untuk ${formData.subject} ${formData.className}. Muat naik di menu RPH Automatik AI.`); return; }
+
+    // Padankan teks RPT dengan pilihan dropdown DSKP (ikut nombor SK/SP)
+    const allSps = Object.values(formOpts.skIndex).flatMap(m => Object.keys(m || {}));
+    const sps = plan.sp.split(/\s*;\s*/).filter(Boolean).map(sp => matchOpt(allSps, sp));
+    const sks = plan.sk.split(/\s*;\s*/).filter(Boolean).map(sk => matchOpt(formOpts.sks, sk));
+    sps.forEach(sp => { const owner = formOpts.sks.find(k => formOpts.skIndex[k]?.[sp] !== undefined); if (owner && !sks.includes(owner)) sks.push(owner); });
+    const dRow = dskp?.rows.find(r => sps.some(sp => codeOf(sp) && codeOf(r.sp) === codeOf(sp)));
+    const title = (sks[0] && formOpts.skTitle?.[sks[0]]) || dRow?.title || plan.title;
+    const bidang = dRow?.field && dRow.field !== 'Umum' ? dRow.field : (plan.field || curBidang);
+    const field = joinField(curTema, bidang || '');
+    setSelectedSKs(sks); setSelectedSPs(sps);
+    setFormData(prev => ({ ...prev, title, field, sk: sks.join('; '), sp: sps.join('; ') }));
+    setAutoMsg(`🤖 Diisi dari ${plan.source}${withAi && getGeminiKey() ? ' — Gemini sedang menjana objektif & aktiviti...' : ''}`);
+
+    if (!withAi) return;
+    if (!getGeminiKey()) { setAutoMsg(`🤖 Diisi dari ${plan.source}. Masukkan Kunci API Gemini (Tetapan) untuk jana Objektif/Aktiviti.`); return; }
+    setLoading(true);
+    const token = ++genTokenRef.current;
+    try {
+      const toMin = (t?: string) => { const [h, m] = (t || '0:0').split(':').map(Number); return h * 60 + m; };
+      const mins = toMin(formData.endTime) - toMin(formData.startTime);
+      const out = await withAiTimeout(generateErphContent({
+        subject: formData.subject, form: formData.className, classTitle: formData.classTitle,
+        title, field, sk: sks.join('; '), sp: sps.join('; '),
+        dskpRows: findDskpRows(dskpDocs, formData.subject, formData.className, title, sks, sps),
+        language: (formData.language as any) || 'BM',
+        duration: mins > 0 ? `${mins} minit` : undefined,
+        extraNotes: [plan.notes && `Cadangan dari RPT: ${plan.notes}`, aiExtraNotes].filter(Boolean).join('. ') || undefined,
+      }));
+      if (token !== genTokenRef.current) return;   // telah dihentikan
+      setFormData(prev => ({
+        ...prev, language: effectiveLanguage(formData.subject, formData.language),
+        objective: out.objective, activities: out.activities, reflection: noReflection ? '' : out.reflection, bbm: 'Lain-lain (nyatakan)',
+      }));
+      setCustomBbm(out.bbm);
+      setAutoMsg(`✅ RPH diisi automatik (${plan.source} + Gemini AI)${noReflection ? ' — refleksi dikosongkan (minggu hadapan)' : ''}. Semak & tekan Simpan.`);
+    } catch (e: any) {
+      if (token !== genTokenRef.current) return;
+      setAutoMsg(`⚠ Tajuk/SK/SP diisi, tetapi Gemini gagal: ${String(e?.message || e).slice(0, 140)}. Tekan JANA AI untuk cuba semula.`);
+    } finally { if (token === genTokenRef.current) setLoading(false); }
+  };
+
+  // Slot kosong → isi automatik sebaik DSKP/RPT tersedia
+  useEffect(() => {
+    if (!autoFill || autoDoneRef.current || isPengurusan) return;
+    if (initialData?.sk || initialData?.sp || initialData?.objective) return;
+    if (!formData.subject || !formData.className) return;
+    const ready = formOpts.sks.length > 0 || !!findRptDoc(rptDocs, formData.subject, formData.className);
+    if (!ready) return;
+    autoDoneRef.current = true;
+    handleAutoFill(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoFill, formOpts.sks.length, rptDocs.length, formData.subject, formData.className]);
 
   // Tukar kandungan Rumi → Jawi menggunakan Gemini
   const handleJawiConversion = async () => {
@@ -802,6 +901,22 @@ const ERPHForm: React.FC<ERPHFormProps> = ({ user, onSave, onCancel, masterData,
                 <p className={`text-xs sm:text-sm font-black italic ${isPendidikanIslam ? 'text-right' : ''}`}>{formData.core || "Sila lengkapkan pilihan SP..."}</p>
               </div>
               <div className="flex flex-wrap gap-2 w-full sm:w-auto">
+                <button
+                  type="button"
+                  onClick={() => handleAutoFill(true)}
+                  title="Isi Tajuk, Bidang, SK, SP dari RPT/DSKP mengikut jadual, kemudian jana Objektif/Aktiviti/BBM/Refleksi"
+                  disabled={loading || isPengurusan}
+                  className="flex-1 sm:flex-none justify-center bg-amber-400 text-slate-900 px-4 py-3 sm:py-2 rounded-xl font-black text-[10px] uppercase flex items-center gap-2 hover:bg-amber-300 transition-all disabled:opacity-50"
+                >
+                  {loading ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
+                  AUTO ISI (RPT + AI)
+                </button>
+                {loading && (
+                  <button type="button" onClick={stopGeneration} title="Henti penjanaan Gemini"
+                    className="flex-1 sm:flex-none justify-center bg-rose-500 text-white px-4 py-3 sm:py-2 rounded-xl font-black text-[10px] uppercase flex items-center gap-2 hover:bg-rose-600 transition-all">
+                    <X size={14} /> HENTI JANA
+                  </button>
+                )}
                 <button 
                   type="button" 
                   onClick={handleBulkAiGenerate} 
@@ -823,6 +938,12 @@ const ERPHForm: React.FC<ERPHFormProps> = ({ user, onSave, onCancel, masterData,
                 </button>
               </div>
             </div>
+          {autoMsg && (
+            <div className="p-3 rounded-2xl bg-amber-50 border border-amber-200 text-xs font-semibold text-amber-900 flex items-center gap-2">
+              {loading && <Loader2 size={14} className="animate-spin shrink-0" />}<span className="flex-1">{autoMsg}</span>
+              {loading && <button type="button" onClick={stopGeneration} className="shrink-0 px-3 py-1.5 rounded-lg bg-rose-500 text-white text-[10px] font-black uppercase">Henti</button>}
+            </div>
+          )}
           {matchedDskpRows.some(r => r.performance || r.notes) && (
             <div className="p-4 bg-violet-50 border border-violet-100 rounded-2xl space-y-2 text-xs text-slate-700">
               <p className="text-[9px] font-black uppercase tracking-widest text-violet-500 flex items-center gap-1"><Database size={12} /> Rujukan DSKP (digunakan oleh AI)</p>
