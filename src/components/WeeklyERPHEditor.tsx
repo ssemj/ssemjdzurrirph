@@ -22,6 +22,14 @@ const addDays = (s: string, n: number) => { const d = parseDate(s); d.setDate(d.
 const mondayOf = (s: string) => { const d = parseDate(s); const wd = d.getDay() || 7; d.setDate(d.getDate() - (wd - 1)); return fmt(d); };
 const dayNameOf = (s: string) => ALL_DAYS[parseDate(s).getDay()];
 const shortDate = (s: string) => parseDate(s).toLocaleDateString('ms-MY', { day: 'numeric', month: 'short' });
+// Warna tab hari (tab aktif berwarna penuh supaya jelas hari mana sedang dibuka)
+const DAY_COLORS: Record<string, { bg: string; border: string; text: string; dot: string; hover: string }> = {
+  Isnin:  { bg: 'bg-blue-600',    border: 'border-blue-800',    text: 'text-blue-700',    dot: 'bg-blue-500',    hover: 'hover:border-blue-300' },
+  Selasa: { bg: 'bg-emerald-600', border: 'border-emerald-800', text: 'text-emerald-700', dot: 'bg-emerald-500', hover: 'hover:border-emerald-300' },
+  Rabu:   { bg: 'bg-amber-500',   border: 'border-amber-700',   text: 'text-amber-700',   dot: 'bg-amber-500',   hover: 'hover:border-amber-300' },
+  Khamis: { bg: 'bg-violet-600',  border: 'border-violet-800',  text: 'text-violet-700',  dot: 'bg-violet-500',  hover: 'hover:border-violet-300' },
+  Jumaat: { bg: 'bg-rose-600',    border: 'border-rose-800',    text: 'text-rose-700',    dot: 'bg-rose-500',    hover: 'hover:border-rose-300' },
+};
 const normDay = (d?: string) => { const x = String(d || '').trim().toLowerCase(); return DAYS.find(D => D.toLowerCase() === x); };
 const newId = () => Math.random().toString(36).slice(2, 11);
 
@@ -364,16 +372,22 @@ const WeeklyERPHEditor: React.FC<Props> = ({
             const list = entriesByDay[day] || [];
             const done = list.filter(e => e.saved).length;
             const active = day === activeDay;
+            const c = DAY_COLORS[day];
             return (
-              <button key={day} onClick={() => setActiveDay(day)}
-                className={`flex-1 min-w-[110px] px-4 py-3 text-left border-b-2 transition-all ${active ? 'border-blue-600 bg-white' : 'border-transparent hover:bg-white/60'}`}>
-                <p className={`text-xs font-black uppercase tracking-wide ${active ? 'text-blue-600' : 'text-slate-600'}`}>{day}</p>
-                {holidayOn(calendar, dateOf(day)) && (
-                  <p className="text-[9px] font-black text-amber-600 uppercase truncate">Cuti · {holidayOn(calendar, dateOf(day))!.name}</p>
-                )}
-                <p className="text-[10px] text-slate-400 font-bold">{shortDate(dateOf(day))}
-                  {list.length > 0 && <span className={`ml-2 px-1.5 py-0.5 rounded-md ${done === list.length ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>{done}/{list.length}</span>}
+              <button key={day} onClick={() => setActiveDay(day)} aria-pressed={active}
+                className={`relative flex-1 min-w-[110px] px-4 py-3 text-left border-t-4 transition-all duration-200 ${active
+                  ? `${c.bg} ${c.border} text-white shadow-lg z-10 -translate-y-0.5 rounded-t-xl`
+                  : `border-transparent hover:bg-white ${c.hover}`}`}>
+                <p className={`text-xs font-black uppercase tracking-wide flex items-center gap-1.5 ${active ? 'text-white' : c.text}`}>
+                  <span className={`inline-block w-2 h-2 rounded-full ${active ? 'bg-white' : c.dot}`} />{day}
                 </p>
+                {holidayOn(calendar, dateOf(day)) && (
+                  <p className={`text-[9px] font-black uppercase truncate ${active ? 'text-white/90' : 'text-amber-600'}`}>Cuti · {holidayOn(calendar, dateOf(day))!.name}</p>
+                )}
+                <p className={`text-[10px] font-bold ${active ? 'text-white/85' : 'text-slate-400'}`}>{shortDate(dateOf(day))}
+                  {list.length > 0 && <span className={`ml-2 px-1.5 py-0.5 rounded-md ${active ? 'bg-white/25 text-white' : done === list.length ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>{done}/{list.length}</span>}
+                </p>
+                {active && <span className={`absolute left-1/2 -bottom-1.5 -translate-x-1/2 w-3 h-3 rotate-45 ${c.bg}`} />}
               </button>
             );
           })}

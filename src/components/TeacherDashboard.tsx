@@ -46,6 +46,8 @@ interface TeacherDashboardProps {
   topSlot?: React.ReactNode;
   /** Buka RPH hantaran yang disemak (PDF rasmi dijana semula daripada data Firebase) */
   onViewBundle?: (bundle: WeeklyBundle) => void;
+  /** Batalkan hantaran mingguan yang belum disemak (RPH kembali ke Draf) */
+  onCancelBundle?: (bundle: WeeklyBundle) => Promise<void>;
 }
 
 const UTILITY_MENUS = [
@@ -67,7 +69,8 @@ const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   notifications = [],
   syncStatus = 'IDLE',
   topSlot,
-  onViewBundle
+  onViewBundle,
+  onCancelBundle
 }) => {
   const isAdmin = user.role === 'ADMIN' || !!adminUser;
   const [weekFilter, setWeekFilter] = useState<number | 'all'>('all'); 
@@ -82,6 +85,10 @@ const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   const [isSharingWeek, setIsSharingWeek] = useState(false);
   const [showArchive, setShowArchive] = useState(false);
   const closeWeekShare = () => { setSharingWeek(null); setWeekRecipients([]); setShareSearch(''); };
+  // Dialog pengesahan (kongsi / batal hantaran)
+  const [confirmBox, setConfirmBox] = useState<{ title: string; message: React.ReactNode; confirmLabel: string; tone?: 'emerald' | 'rose'; onConfirm: () => void | Promise<void> } | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
+  const [cancellingId, setCancellingId] = useState<string | null>(null);
   const [rphSearch, setRphSearch] = useState('');
 
   const otherTeachers = useMemo(() => {
@@ -580,6 +587,19 @@ const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                           >
                             <Eye size={14} /> Lihat Draf Template
                           </button>
+                          {onCancelBundle && (
+                            <button
+                              disabled={cancellingId === bundle.id_minggu}
+                              onClick={() => setConfirmBox({
+                                title: 'Batal Hantaran Mingguan', confirmLabel: 'Ya, Batalkan', tone: 'rose',
+                                message: <>Batalkan hantaran <b>{bundle.week}</b>?<span className="block mt-2 text-xs text-slate-500">Hantaran ini akan ditarik balik daripada senarai semakan pentadbir dan RPH kembali ke status <b>Draf</b>. Anda boleh sunting dan hantar semula.</span></>,
+                                onConfirm: async () => { setCancellingId(bundle.id_minggu); try { await onCancelBundle(bundle); } finally { setCancellingId(null); } },
+                              })}
+                              className="w-full flex items-center justify-center gap-1.5 bg-white text-rose-600 py-2.5 rounded-lg md:rounded-xl font-black text-[8px] md:text-[9px] uppercase border border-rose-200 hover:bg-rose-50 transition-all active:scale-95 disabled:opacity-50"
+                            >
+                              {cancellingId === bundle.id_minggu ? <RefreshCw size={14} className="animate-spin" /> : <X size={14} />} Batal &amp; Sunting Semula
+                            </button>
+                          )}
                         </div>
                       )}
                     </div>
@@ -694,10 +714,17 @@ const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                 </div>
                 <button
                   disabled={weekRecipients.length === 0 || weekCount === 0 || isSharingWeek}
-                  onClick={async () => {
-                    setIsSharingWeek(true);
-                    try { await onShareWeek?.(sharingWeek, weekRecipients); closeWeekShare(); }
-                    finally { setIsSharingWeek(false); }
+                  onClick={() => {
+                    const names = teachers.filter(t => weekRecipients.includes(t.id)).map(t => t.name);
+                    setConfirmBox({
+                      title: 'Sahkan Kongsi RPH Seminggu', confirmLabel: 'Ya, Kongsi', tone: 'emerald',
+                      message: <>Kongsi <b>{weekCount} RPH Minggu {sharingWeek}</b> kepada <b>{names.length} guru</b>:<span className="block mt-2 text-xs text-slate-500 max-h-28 overflow-y-auto">{names.join(', ')}</span></>,
+                      onConfirm: async () => {
+                        setIsSharingWeek(true);
+                        try { await onShareWeek?.(sharingWeek, weekRecipients); closeWeekShare(); }
+                        finally { setIsSharingWeek(false); }
+                      },
+                    });
                   }}
                   className="w-full py-4 rounded-xl bg-emerald-600 text-white text-xs font-black uppercase flex items-center justify-center gap-2 hover:bg-emerald-700 disabled:opacity-40"
                 >
@@ -751,10 +778,16 @@ const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                     <button 
                       key={teacher.id}
                       onClick={() => {
-                        onShare(sharingErph, teacher.id);
-                        setSharingErph(null);
-                        setShareSearch('');
-                        alert(`RPH telah dikongsi kepada ${teacher.name}`);
+                        const erphToShare = sharingErph;
+                        setConfirmBox({
+                          title: 'Sahkan Kongsi RPH', confirmLabel: 'Ya, Kongsi', tone: 'emerald',
+                          message: <>Kongsi RPH <b>{erphToShare.subject} {erphToShare.classTitle}</b> ({erphToShare.day} {formatDate(erphToShare.date)}) kepada <b>{teacher.name}</b>?</>,
+                          onConfirm: () => {
+                            onShare(erphToShare, teacher.id);
+                            setSharingErph(null);
+                            setShareSearch('');
+                          },
+                        });
                       }}
                       className="w-full p-4 flex items-center gap-4 rounded-2xl border border-slate-50 hover:bg-emerald-50 hover:border-emerald-100 transition-all text-left group"
                     >
@@ -809,6 +842,26 @@ const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                 className="flex-1 py-4 bg-red-600 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-red-700 shadow-lg shadow-red-200 transition-all active:scale-95"
               >
                 Padam
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Dialog pengesahan */}
+      {confirmBox && (
+        <div className="fixed inset-0 z-[700] bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => !confirmBusy && setConfirmBox(null)}>
+          <div className="bg-white rounded-3xl shadow-2xl max-w-md w-full p-6 animate-slideUp" onClick={e => e.stopPropagation()}>
+            <div className={`w-12 h-12 rounded-2xl flex items-center justify-center mb-4 ${confirmBox.tone === 'rose' ? 'bg-rose-50 text-rose-600' : 'bg-emerald-50 text-emerald-600'}`}>
+              {confirmBox.tone === 'rose' ? <AlertCircle size={24} /> : <Share2 size={24} />}
+            </div>
+            <h3 className="text-lg font-black text-slate-900">{confirmBox.title}</h3>
+            <div className="text-sm text-slate-600 mt-2">{confirmBox.message}</div>
+            <div className="flex gap-3 mt-6">
+              <button disabled={confirmBusy} onClick={() => setConfirmBox(null)} className="flex-1 py-3 rounded-xl border border-slate-200 text-sm font-bold text-slate-600 hover:bg-slate-50">Batal</button>
+              <button disabled={confirmBusy}
+                onClick={async () => { setConfirmBusy(true); try { await confirmBox.onConfirm(); } finally { setConfirmBusy(false); setConfirmBox(null); } }}
+                className={`flex-1 py-3 rounded-xl text-white text-sm font-bold flex items-center justify-center gap-2 disabled:opacity-60 ${confirmBox.tone === 'rose' ? 'bg-rose-600 hover:bg-rose-700' : 'bg-emerald-600 hover:bg-emerald-700'}`}>
+                {confirmBusy && <RefreshCw size={15} className="animate-spin" />}{confirmBox.confirmLabel}
               </button>
             </div>
           </div>

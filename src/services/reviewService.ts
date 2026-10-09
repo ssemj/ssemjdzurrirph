@@ -111,40 +111,87 @@ export async function loadSignatures(ids: string[]): Promise<Record<string, stri
   return { ...sigCache };
 }
 
+// ---------------- Batal hantaran (guru) ----------------
+export async function cancelBundleFs(bundle: WeeklyBundle, rphIds: string[], teacherId: string) {
+  const now = new Date().toISOString();
+  const batch = writeBatch(db);
+  batch.set(doc(db, 'weekly_bundles', safeId(bundle.id_minggu)), {
+    id_minggu: bundle.id_minggu, teacherId: bundle.teacherId || teacherId, teacherName: bundle.teacherName || '',
+    week: bundle.week || '', rphIds: JSON.stringify(rphIds), timestamp: bundle.timestamp || '',
+    status_proses: 'DIBATALKAN', cancelledAt: now, fsUpdatedAt: now,
+  }, { merge: true });
+  rphIds.slice(0, 450).forEach(id => batch.set(doc(db, 'erph_records', safeId(id)), { status: ERPHStatus.DRAFT, cancelledBundleId: bundle.id_minggu }, { merge: true }));
+  await withTimeout(batch.commit());
+  return now;
+}
+
+// ---------------- Tapis hantaran berganda ----------------
+export const weekNumOf = (w: any) => parseInt(String(w || '').replace(/[^0-9]/g, ''), 10) || 0;
+/** Masa hantar: nombor Date.now() di hujung id_minggu (M37_id_1728...), jika tidak guna timestamp. */
+export const bundleStamp = (b: WeeklyBundle) => {
+  const m = String(b.id_minggu || '').match(/_(\d{12,})$/);
+  if (m) return Number(m[1]);
+  const t = Date.parse(String(b.timestamp || ''));
+  return isNaN(t) ? 0 : t;
+};
+const teacherKey = (b: WeeklyBundle) => String(b.teacherId || b.teacherName || '').trim().toLowerCase();
+
+/** Satu hantaran sahaja bagi setiap guru + minggu: utamakan yang DISEMAK, jika tiada ambil yang terkini. */
+export function dedupeBundles(bundles: WeeklyBundle[]): WeeklyBundle[] {
+  const best = new Map<string, WeeklyBundle>();
+  const rank = (b: WeeklyBundle) => (b.status_proses === 'DISEMAK' || (b.linkPdfSelesai && b.linkPdfSelesai.trim()) ? 1 : 0);
+  for (const b of bundles) {
+    const k = `${teacherKey(b)}|${weekNumOf(b.week)}`;
+    const cur = best.get(k);
+    if (!cur || rank(b) > rank(cur) || (rank(b) === rank(cur) && bundleStamp(b) > bundleStamp(cur))) best.set(k, b);
+  }
+  const keep = new Set(Array.from(best.values()));
+  return bundles.filter(b => keep.has(b));
+}
+
 // ---------------- Gabung ke data aplikasi ----------------
-/** Status semakan Firebase mengatasi data Google Sheet; hantaran Firebase sahaja ditambah. */
+/** Status Firebase mengatasi Google Sheet; hantaran DIBATALKAN dibuang; pendua ditapis. */
 export function overlayBundles(bundles: WeeklyBundle[], reviews: BundleReviewDoc[]): WeeklyBundle[] {
-  if (!reviews.length) return bundles;
   const map = new Map(reviews.map(r => [r.id_minggu, r]));
   const seen = new Set<string>();
-  const out = bundles.map(b => {
+  const out: WeeklyBundle[] = [];
+  for (const b of bundles) {
     const r = map.get(b.id_minggu);
-    if (!r) return b;
-    seen.add(b.id_minggu);
-    if (r.status_proses !== 'DISEMAK') return b;
-    return { ...b, status_proses: 'DISEMAK', status: 'DISEMAK', comment: r.comment || b.comment, reviewedBy: r.reviewedBy || b.reviewedBy, reviewerDesignation: r.reviewerDesignation || b.reviewerDesignation, rphIds: b.rphIds || r.rphIds } as WeeklyBundle;
-  });
-  reviews.filter(r => !seen.has(r.id_minggu)).forEach(r => out.push({
+    if (r) seen.add(b.id_minggu);
+    if (r?.status_proses === 'DIBATALKAN') continue;
+    if (!r || r.status_proses !== 'DISEMAK') { out.push(b); continue; }
+    out.push({ ...b, status_proses: 'DISEMAK', status: 'DISEMAK', comment: r.comment || b.comment, reviewedBy: r.reviewedBy || b.reviewedBy, reviewerDesignation: r.reviewerDesignation || b.reviewerDesignation, rphIds: b.rphIds || r.rphIds } as WeeklyBundle);
+  }
+  reviews.filter(r => !seen.has(r.id_minggu) && r.status_proses !== 'DIBATALKAN').forEach(r => out.push({
     timestamp: r.timestamp || r.fsUpdatedAt, teacherName: r.teacherName, week: r.week, id_minggu: r.id_minggu,
     status_proses: r.status_proses, status: r.status_proses, jana_url: '', teacherId: r.teacherId, rphIds: r.rphIds,
     comment: r.comment, reviewedBy: r.reviewedBy, reviewerDesignation: r.reviewerDesignation,
   } as WeeklyBundle));
-  return out;
+  return dedupeBundles(out);
 }
 
+/** Status RPH ikut hantaran Firebase (terkini menang): DIBATALKAN→Draf, PENDING→Dihantar, DISEMAK→Disemak. */
 export function overlayErphs(erphs: ERPHData[], reviews: BundleReviewDoc[], sigs: Record<string, string>): ERPHData[] {
-  const done = reviews.filter(r => r.status_proses === 'DISEMAK');
-  if (!done.length) return erphs;
+  if (!reviews.length) return erphs;
   const byId = new Map<string, BundleReviewDoc>();
-  done.forEach(r => parseRphIds(r.rphIds).forEach(id => byId.set(id, r)));
+  [...reviews].sort((a, b) => String(a.fsUpdatedAt).localeCompare(String(b.fsUpdatedAt)))
+    .forEach(r => parseRphIds(r.rphIds).forEach(id => byId.set(id, r)));
   let changed = false;
   const out = erphs.map(e => {
     const r = byId.get(e.id);
     if (!r) return e;
-    const sig = (r.signatureId && sigs[r.signatureId]) || e.reviewSignature;
-    if (e.status === ERPHStatus.REVIEWED && e.reviewComment === r.comment && e.reviewSignature === sig) return e;
-    changed = true;
-    return { ...e, status: ERPHStatus.REVIEWED, reviewComment: r.comment, reviewedBy: r.reviewedBy, reviewerDesignation: r.reviewerDesignation, reviewSignature: sig, reviewedAt: r.reviewedAt };
+    let next: ERPHData = e;
+    if (r.status_proses === 'DISEMAK') {
+      const sig = (r.signatureId && sigs[r.signatureId]) || e.reviewSignature;
+      if (!(e.status === ERPHStatus.REVIEWED && e.reviewComment === r.comment && e.reviewSignature === sig))
+        next = { ...e, status: ERPHStatus.REVIEWED, reviewComment: r.comment, reviewedBy: r.reviewedBy, reviewerDesignation: r.reviewerDesignation, reviewSignature: sig, reviewedAt: r.reviewedAt };
+    } else if (r.status_proses === 'DIBATALKAN') {
+      if (e.status !== ERPHStatus.DRAFT && e.status !== ERPHStatus.REVIEWED) next = { ...e, status: ERPHStatus.DRAFT };
+    } else if (r.status_proses === 'PENDING') {
+      if (e.status === ERPHStatus.DRAFT) next = { ...e, status: ERPHStatus.SELESAI };
+    }
+    if (next !== e) changed = true;
+    return next;
   });
   return changed ? out : erphs;
 }

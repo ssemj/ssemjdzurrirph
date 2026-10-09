@@ -5,7 +5,7 @@ import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { UserProfile, UserRole, ERPHData, ERPHStatus, MasterData, Resource, WeeklyBundle, AppNotification, ScheduleSlot, DskpDocument, AcademicCalendar, RptDocument, TeacherTimetable } from './types';
 import { loadTimetable, saveTimetable, DEFAULT_AUTOPILOT } from './services/timetableService';
 import { loadAllRpt } from './services/rptService';
-import { BundleReviewDoc, loadBundleReviews, loadSignatures, overlayBundles, overlayErphs, parseRphIds, reviewBundlesFs, saveSubmissionFs } from './services/reviewService';
+import { BundleReviewDoc, loadBundleReviews, loadSignatures, overlayBundles, overlayErphs, parseRphIds, reviewBundlesFs, saveSubmissionFs, cancelBundleFs, dedupeBundles, weekNumOf } from './services/reviewService';
 import { runAutoRph } from './services/autoRphRunner';
 import { dayNameOf as dayNameOfDate, autoErphId as autoErphIdOf } from './services/autoRphCore';
 import { getGeminiKey } from './services/geminiService';
@@ -548,7 +548,7 @@ const App: React.FC = () => {
               ? b.linkPdfSelesai 
               : (b.jana_url || b.pdfBase64)
           }));
-          setBundles(processedBundles);
+          setBundles(dedupeBundles(processedBundles));   // satu hantaran bagi setiap guru + minggu
         }
         setSyncStatus('IDLE');
         reloadReviews(user);   // semakan Firebase digabung SELEPAS data Google Sheet
@@ -815,10 +815,56 @@ const App: React.FC = () => {
 
 
 
+  // ===== Tapisan hantaran: satu hantaran aktif bagi setiap minggu =====
+  const submittingRef = useRef(false);
+  const myBundlesForWeek = (week: number) => bundles.filter(b =>
+    weekNumOf(b.week) === Number(week) && (
+      String(b.teacherId || '').trim().toLowerCase() === String(user?.id || '').trim().toLowerCase() ||
+      String(b.teacherName || '').trim().toLowerCase() === String(user?.name || '').trim().toLowerCase()));
+  const isReviewedBundle = (b: WeeklyBundle) => b.status_proses === 'DISEMAK' || !!(b.linkPdfSelesai && b.linkPdfSelesai.trim());
+
+  /** Batal (tarik balik) hantaran yang belum disemak → RPH kembali ke Draf. */
+  const handleCancelBundle = async (b: WeeklyBundle, silent = false) => {
+    if (!user) return;
+    if (isReviewedBundle(b)) { showNotification('Hantaran ini sudah disemak dan tidak boleh dibatalkan.', 'error'); return; }
+    const ids = bundleRphIdsOf(b);
+    try {
+      const at = await cancelBundleFs(b, ids, user.id);
+      setFsReviews(prev => [...prev.filter(r => r.id_minggu !== b.id_minggu), {
+        id_minggu: b.id_minggu, teacherId: b.teacherId || user.id, teacherName: b.teacherName || user.name, week: b.week,
+        rphIds: JSON.stringify(ids), status_proses: 'DIBATALKAN', timestamp: b.timestamp, fsUpdatedAt: at,
+      }]);
+      setBundles(prev => prev.filter(x => x.id_minggu !== b.id_minggu));
+      setAllErphs(prev => prev.map(e => ids.includes(e.id) && e.status !== ERPHStatus.REVIEWED ? { ...e, status: ERPHStatus.DRAFT } : e));
+      // Isnin minggu hadapan yang ikut hantaran ini → boleh dihantar semula
+      const w = weekNumOf(b.week);
+      allErphs.filter(e => ids.includes(e.id) && Number(e.bundledInWeek) === w).forEach(e => saveErphQuiet({ ...e, bundledInWeek: 0, status: ERPHStatus.DRAFT }));
+      setOverlayTick(t => t + 1);
+      if (!silent) showNotification(`↩️ Hantaran ${b.week} dibatalkan. RPH kembali ke Draf — sunting & hantar semula.`, 'success');
+    } catch (e: any) {
+      showNotification('Gagal membatalkan hantaran: ' + (e?.message || e), 'error');
+      throw e;
+    }
+  };
+
   const handleBulkSubmitWeek = async (week: number, existingPdfBase64?: string) => {
     if (!user) return;
+    if (submittingRef.current) return;              // elak klik berganda
+    const existing = myBundlesForWeek(week);
+    if (existing.some(isReviewedBundle)) {
+      showNotification(`Minggu ${week} sudah DISEMAK oleh pentadbir. Hantaran semula tidak dibenarkan.`, 'error');
+      return;
+    }
+    if (existing.length > 0) {
+      const ok = window.confirm(`Minggu ${week} sudah dihantar dan sedang menunggu semakan.\n\nBatalkan hantaran lama dan hantar versi terkini?`);
+      if (!ok) return;
+      submittingRef.current = true;
+      try { for (const b of existing) await handleCancelBundle(b, true); }
+      catch { submittingRef.current = false; return; }
+    }
+    submittingRef.current = true;
     const weekRPHs = weekBundleRphs(week);   // Isnin → Isnin minggu hadapan
-    if (weekRPHs.length === 0) return;
+    if (weekRPHs.length === 0) { submittingRef.current = false; return; }
     // Tandakan Isnin minggu hadapan sebagai sudah dihantar bersama minggu ini
     weekRPHs.filter(e => Number(e.week) === Number(week) + 1).forEach(e => { saveErphQuiet({ ...e, bundledInWeek: week, status: ERPHStatus.SELESAI }); });
 
@@ -853,7 +899,7 @@ const App: React.FC = () => {
       setTimeout(handleSyncCloud, 3000); 
     } catch (e: any) { 
       showNotification("Gagal hantar. Sila cuba lagi.", "error");
-    } finally { setIsProcessingBundle(false); }
+    } finally { setIsProcessingBundle(false); submittingRef.current = false; }
   };
 
   // ===== SEMAKAN PENTADBIR → FIREBASE (satu batch, tiada PDF / GAS) =====
@@ -1498,6 +1544,7 @@ const App: React.FC = () => {
           onDelete={handleDeleteERPH}
           onViewWeek={openWeekPreview}
           onViewBundle={openBundlePreview}
+          onCancelBundle={(b) => handleCancelBundle(b)}
           onDskpUpdated={reloadDskp}
           onShareWeek={handleShareWeek}
           onBulkSubmit={handleBulkSubmitWeek}
