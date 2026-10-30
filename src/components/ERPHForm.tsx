@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { UserProfile, ERPHData, ERPHStatus, MasterData, ScheduleSlot, DskpDocument, RptDocument, PdpcException } from '../types';
-import { planLesson, lessonPosition, findRptDoc, findDskpDoc, lastSpFor, normDay, isFutureWeek, exceptionFor } from '../services/autoRphCore';
+import { planLesson, lessonPosition, findRptDoc, findDskpDoc, lastSpFor, normDay, isFutureWeek, exceptionFor, enrolmentFor } from '../services/autoRphCore';
 import { applyAttendance, attendanceLabel } from '../services/geminiService';
 import { reasonLabel } from '../services/pdpcService';
 import { generateErphContent, getGeminiKey, convertToJawi, subjectLanguage, effectiveLanguage, isManagementSubject, MGMT_SK, MGMT_TAJUK, MGMT_SP_FALLBACK, describeManagementSk } from '../services/geminiService';
@@ -36,9 +36,11 @@ interface ERPHFormProps {
   autoFill?: boolean;
   /** PdPC tidak dapat dijalankan (kursus, MC ...) — refleksi automatik */
   pdpcExceptions?: PdpcException[];
+  /** Bilangan murid kelas dikongsi semua guru */
+  classSizes?: Record<string, { count: number }>;
 }
 
-const ERPHForm: React.FC<ERPHFormProps> = ({ user, onSave, onCancel, masterData, erphs = [], masterSchedule = [], initialData, dskpDocs = [], embedded = false, onSaved, rptDocs = [], autoFill = true, pdpcExceptions = [] }) => {
+const ERPHForm: React.FC<ERPHFormProps> = ({ user, onSave, onCancel, masterData, erphs = [], masterSchedule = [], initialData, dskpDocs = [], embedded = false, onSaved, rptDocs = [], autoFill = true, pdpcExceptions = [], classSizes = {} }) => {
   const bbmOptions = masterData.bbmOptions || [
     'Buku Teks',
     'Nota',
@@ -356,7 +358,8 @@ const ERPHForm: React.FC<ERPHFormProps> = ({ user, onSave, onCancel, masterData,
   const mySlotForForm = useMemo(() => masterSchedule.find(sl => sl.teacherId === user.id
     && String(sl.classTitle || '').trim().toUpperCase() === String(formData.classTitle || '').trim().toUpperCase()
     && Number(sl.studentCount) > 0), [masterSchedule, user.id, formData.classTitle]);
-  const enrolment = Number(formData.enrolment) > 0 ? Number(formData.enrolment) : Number(mySlotForForm?.studentCount) || 0;
+  // Utamakan daftar sekolah (dikongsi), kemudian nilai tersimpan dalam RPH, kemudian jadual guru
+  const enrolment = enrolmentFor(classSizes, formData.className, formData.classTitle, Number(formData.enrolment) > 0 ? Number(formData.enrolment) : Number(mySlotForForm?.studentCount) || 0);
   const langOf = () => effectiveLanguage(formData.subject, formData.language);
   const setAttendance = (v: string) => {
     const att = v === '' ? '' : Math.max(0, Math.min(Number(v), enrolment || 999));

@@ -226,3 +226,9 @@ export function exceptionFor(list: PdpcException[] | undefined, date?: string, s
   if (!date || !list?.length) return undefined;
   return list.find(x => date >= x.startDate && date <= (x.endDate || x.startDate) && (!x.slotIds?.length || (!!slotId && x.slotIds.includes(slotId))));
 }
+
+/** Kunci kelas dikongsi (bilangan murid): "5__SENI-MUZIK" — Tingkatan + Nama Kelas. */
+export const classSizeKey = (className?: string, classTitle?: string) => docKey(normForm(className) || '-', String(classTitle || '').trim().toUpperCase() || '-');
+/** Bilangan murid: daftar sekolah (dikongsi) dahulu, jika tiada guna nilai pada slot. */
+export const enrolmentFor = (sizes: Record<string, { count: number }> | undefined, className?: string, classTitle?: string, fallback?: number) =>
+  Number(sizes?.[classSizeKey(className, classTitle)]?.count) || (Number(fallback) > 0 ? Number(fallback) : 0);

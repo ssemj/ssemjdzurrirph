@@ -11,9 +11,11 @@ import { dayNameOf as dayNameOfDate, autoErphId as autoErphIdOf } from './servic
 import { getGeminiKey } from './services/geminiService';
 import { loadFirebaseTeachers, saveFirebaseTeacher, deleteFirebaseTeacher, toRegistryRow, NewTeacher } from './services/teacherService';
 import { loadExceptions, saveException, deleteException, generateExceptionReflection } from './services/pdpcService';
-import { exceptionFor } from './services/autoRphCore';
+import { exceptionFor, classSizeKey } from './services/autoRphCore';
+import { loadClassSizes, saveClassSize, ClassSize } from './services/classSizeService';
 import type { AutoResult } from './services/autoRphGenerate';
 import AutoRphTodayCard, { AutoRunState } from './components/AutoRphTodayCard';
+import AnnouncementBoard from './components/AnnouncementBoard';
 import type { CenterTab } from './components/AutoRphCenter';
 import { DEFAULT_MASTER_DATA, WEEKS, sortSubjects } from './constants';
 import { loadAllDskp, mergeDskpIntoMasterData } from './services/dskpService';
@@ -131,6 +133,11 @@ const App: React.FC = () => {
   const [fsReviews, setFsReviews] = useState<BundleReviewDoc[]>([]);
   // PdPC tidak dapat dijalankan (kursus, MC, cuti bencana ...) — Firestore pdpc_exceptions
   const [pdpcExceptions, setPdpcExceptions] = useState<PdpcException[]>([]);
+  // Bilangan murid kelas — dikongsi semua guru (Firestore class_sizes)
+  const [classSizes, setClassSizes] = useState<Record<string, ClassSize>>({});
+  const reloadClassSizes = useCallback(async () => {
+    try { setClassSizes(await loadClassSizes()); } catch (e) { console.warn('Gagal memuatkan bilangan murid:', e); }
+  }, []);
   const reloadPdpc = useCallback(async (u: UserProfile | null) => {
     if (!u) return;
     try { setPdpcExceptions(await loadExceptions(u.id)); } catch (e) { console.warn('Gagal memuatkan PdPC ditunda:', e); }
@@ -602,8 +609,8 @@ const App: React.FC = () => {
   useEffect(() => { loadBranding(); }, []);
 
   useEffect(() => {
-    if (user) { reloadDskp(); reloadCalendar(); reloadRpt(); reloadReviews(user); reloadPdpc(user); }   // hantaran/semakan Firebase tidak bergantung pada Google Sheet
-  }, [user?.id, reloadDskp, reloadCalendar, reloadRpt, reloadReviews, reloadPdpc]);
+    if (user) { reloadDskp(); reloadCalendar(); reloadRpt(); reloadReviews(user); reloadPdpc(user); reloadClassSizes(); }   // hantaran/semakan Firebase tidak bergantung pada Google Sheet
+  }, [user?.id, reloadDskp, reloadCalendar, reloadRpt, reloadReviews, reloadPdpc, reloadClassSizes]);
 
   // Muat jadual waktu guru dari Firestore; jika tiada, guna jadual lama (localStorage / Google Sheet)
   useEffect(() => {
@@ -632,6 +639,19 @@ const App: React.FC = () => {
     if (!user) return;
     const next = { ...tt, teacherId: user.id, teacherName: user.name, slots: tt.slots.map(s => ({ ...s, teacherId: user.id })) };
     await saveTimetable(next);
+    // Kongsi bilangan murid setiap kelas dengan semua guru (hanya yang berubah)
+    const seenKeys = new Set<string>();
+    const updates: ClassSize[] = [];
+    for (const sl of next.slots) {
+      const n = Number(sl.studentCount);
+      if (!(n > 0) || !sl.classTitle || /^\s*pengurusan\s*$/i.test(sl.subject)) continue;
+      const k = classSizeKey(sl.className, sl.classTitle);
+      if (seenKeys.has(k)) continue; seenKeys.add(k);
+      // Simpan hanya jika kelas belum didaftarkan, atau guru MENUKAR nilainya (bukan nilai lama dalam jadual)
+      const prev = (timetable?.slots || []).find(p => classSizeKey(p.className, p.classTitle) === k)?.studentCount;
+      if (!classSizes[k] || (Number(prev) !== n && classSizes[k].count !== n)) updates.push(await saveClassSize(sl.className, sl.classTitle, n, user.name));
+    }
+    if (updates.length) setClassSizes(prev => ({ ...prev, ...Object.fromEntries(updates.map(u => [u.key, u])) }));
     setTimetable({ ...next, updatedAt: new Date().toISOString() });
     // Selaraskan dengan jadual sedia ada (editor mingguan & Google Sheet)
     setMasterSchedule(prev => {
@@ -705,6 +725,7 @@ const App: React.FC = () => {
         slots: timetable.slots, settings: timetable.autoPilot, calendar: academicCalendar,
         rptDocs, dskpDocs, erphs: [...allErphsRef.current, ...deletedErphsRef.current],
         exceptions: pdpcExceptions,
+        classSizes,
         save: saveErphQuiet,
         shouldStop: () => autoStopRef.current,
         onProgress: (message, done, total) => setAutoRun({ running: true, message, done, total }),
@@ -724,7 +745,7 @@ const App: React.FC = () => {
       setAutoRun({ running: false, message: '', done: 0, total: 0 });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user, timetable, academicCalendar, rptDocs, dskpDocs, pdpcExceptions]);
+  }, [user, timetable, academicCalendar, rptDocs, dskpDocs, pdpcExceptions, classSizes]);
 
   // Auto-jana 24 jam sebelum kelas: semasa aplikasi dibuka & setiap 30 minit
   const runAutoRef = useRef(runAuto);
@@ -1655,7 +1676,7 @@ const App: React.FC = () => {
           }}
           onNavigate={(v) => { if (v === 'AUTO_RPH' || v === 'TIMETABLE' || v === 'PDPC') setCenterTab(v === 'TIMETABLE' ? 'JADUAL' : v === 'PDPC' ? 'PDPC' : 'AUTO'); setView(v === 'TIMETABLE' || v === 'PDPC' ? 'AUTO_RPH' : v as any); }}
           notifications={notifications}
-          topSlot={timetable && (
+          topSlot={<div className="space-y-6"><AnnouncementBoard />{timetable && (
             <AutoRphTodayCard
               teacherId={user.id}
               slots={timetable.slots}
@@ -1670,7 +1691,7 @@ const App: React.FC = () => {
               onOpenCenter={(t) => { setCenterTab(t); setView('AUTO_RPH'); }}
               onOpenErph={(erph) => { setEditingErph(erph); setEditorWeek(undefined); setView('FORM'); }}
             />
-          )}
+          )}</div>}
         />
       )}
 
@@ -1694,6 +1715,7 @@ const App: React.FC = () => {
           onGenerateWeek={(d) => runAuto('WEEK', d)}
           onStop={stopAuto}
           pdpcExceptions={pdpcExceptions}
+          classSizes={classSizes}
           onSavePdpc={handleSavePdpc}
           onDeletePdpc={handleDeletePdpc}
           onOpenErph={(erph) => { setEditingErph(erph); setEditorWeek(undefined); setView('FORM'); }}
@@ -1712,6 +1734,7 @@ const App: React.FC = () => {
           onStopAuto={stopAuto}
           deletedErphs={deletedErphs}
           pdpcExceptions={pdpcExceptions}
+          classSizes={classSizes}
           onDelete={handleDeleteERPH}
           onSkipSlot={handleSkipSlot}
           erphs={allErphs}

@@ -20,13 +20,16 @@ async function main() {
   if (!key) throw new Error('GEMINI_API_KEY tiada (tetapkan di GitHub → Settings → Secrets → Actions).');
   setGeminiKey(key);
 
-  const [calSnap, rptSnap, dskpSnap, ttSnap, excSnap] = await Promise.all([
+  const [calSnap, rptSnap, dskpSnap, ttSnap, excSnap, sizeSnap] = await Promise.all([
     getDoc(doc(db, 'settings', 'academicCalendar')),
     getDocs(collection(db, 'rpt')),
     getDocs(collection(db, 'dskp')),
     getDocs(query(collection(db, 'timetables'), where('autoPilot.enabled', '==', true))),
     getDocs(collection(db, 'pdpc_exceptions')),
+    getDocs(collection(db, 'class_sizes')),
   ]);
+  const classSizes: Record<string, { count: number }> = {};
+  sizeSnap.docs.forEach(d => { classSizes[d.id] = d.data() as any; });
   const calendar = calSnap.exists() ? (calSnap.data() as AcademicCalendar) : null;
   if (!calendar?.week1Monday) { console.log('Kalendar akademik belum ditetapkan — berhenti.'); return; }
   const rptDocs = rptSnap.docs.map(d => ({ id: d.id, ...d.data() } as RptDocument));
@@ -61,7 +64,7 @@ async function main() {
         const res = await generateForOccurrence(occ, {
           teacherId: tt.teacherId, teacherName: tt.teacherName || '', slots: tt.slots,
           settings: { enabled: true, leadHours: lead, language: tt.autoPilot?.language || 'BM', skipManagement: !!tt.autoPilot?.skipManagement },
-          rptDocs, dskpDocs, erphs: known, generatedBy: 'CLOUD', exceptions,
+          rptDocs, dskpDocs, erphs: known, generatedBy: 'CLOUD', exceptions, classSizes,
         });
         if (res.status !== 'CREATED' || !res.erph) { skipped++; console.log(`• Langkau ${id}: ${res.message}`); continue; }
         await setDoc(doc(db, 'erph_records', id), { ...res.erph, createdAt: serverTimestamp(), source: 'GitHub_Auto_RPH' });

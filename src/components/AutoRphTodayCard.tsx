@@ -4,7 +4,7 @@
 // "Jana RPH Hari Ini" (trigger manual Gemini AI).
 // ============================================================
 import React, { useMemo, useState } from 'react';
-import { Sparkles, Loader2, CalendarClock, CheckCircle2, CircleDashed, ChevronRight, Bot, AlertTriangle, Settings2, Square, CalendarRange } from 'lucide-react';
+import { Sparkles, Loader2, CalendarClock, CheckCircle2, CircleDashed, ChevronRight, Bot, AlertTriangle, Settings2, Square, CalendarRange, CalendarX } from 'lucide-react';
 import { AcademicCalendar, AutoPilotSettings, ERPHData, ScheduleSlot } from '../types';
 import { addDaysStr, findExisting, mytDateStr, occurrencesOnDate, weekOfDate } from '../services/autoRphCore';
 import { formatTime } from '../constants';
@@ -22,7 +22,7 @@ interface Props {
   onTrigger: (date: string) => void;
   onGenerateWeek: (date: string) => void;
   onStop: () => void;
-  onOpenCenter: (tab: 'JADUAL' | 'RPT' | 'AUTO') => void;
+  onOpenCenter: (tab: 'JADUAL' | 'RPT' | 'AUTO' | 'PDPC') => void;
   onOpenErph: (erph: ERPHData) => void;
 }
 
@@ -70,7 +70,14 @@ const AutoRphTodayCard: React.FC<Props> = ({ teacherId, slots, erphs, calendar, 
             className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl border border-indigo-200 bg-white text-indigo-700 text-xs font-bold hover:border-indigo-400 disabled:opacity-50">
             <CalendarRange size={15} /> Jana Seminggu (Isnin→Isnin)
           </button>
-          <button onClick={() => onOpenCenter('AUTO')} title="Pusat RPH Automatik" className="p-2.5 rounded-xl border border-slate-200 bg-white text-slate-600 hover:border-slate-400"><Settings2 size={15} /></button>
+          <button onClick={() => onOpenCenter('PDPC')} title="Isi bila berkursus, MC, CRK, cuti bencana, PdPR, peperiksaan ..."
+            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-rose-600 text-white text-xs font-bold hover:bg-rose-700">
+            <CalendarX size={15} /> PdPC Tidak Dijalankan
+          </button>
+          <button onClick={() => onOpenCenter('AUTO')} title="Jadual waktu, RPT & tetapan auto-jana"
+            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-slate-900 text-white text-xs font-bold hover:bg-slate-700">
+            <Settings2 size={15} /> Tetapan Auto-Jana
+          </button>
         </div>
       </div>
 

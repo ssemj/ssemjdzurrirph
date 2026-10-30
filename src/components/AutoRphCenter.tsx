@@ -16,7 +16,7 @@ import { PDPC_REASONS, reasonLabel } from '../services/pdpcService';
 import SchoolTimetableGrid from './SchoolTimetableGrid';
 import { formatTime } from '../constants';
 import {
-  DAY_LABEL, dayNameOf, addDaysStr, findDskpDoc, findExisting, findRptDoc, lastSpFor, lessonPosition, mytDateStr, normDay, planLesson, weekOfDate,
+  DAY_LABEL, dayNameOf, addDaysStr, classSizeKey, enrolmentFor, findDskpDoc, findExisting, findRptDoc, lastSpFor, lessonPosition, mytDateStr, normDay, planLesson, weekOfDate,
 } from '../services/autoRphCore';
 import { plannedOccurrences } from '../services/autoRphRunner';
 import { extractRpt, saveRpt, deleteRpt, cleanRptRows } from '../services/rptService';
@@ -47,6 +47,7 @@ interface Props {
   onGenerateWeek: (date: string) => void;
   onStop: () => void;
   pdpcExceptions?: PdpcException[];
+  classSizes?: Record<string, { count: number; updatedBy?: string; updatedAt?: string }>;
   onSavePdpc?: (input: { startDate: string; endDate: string; reason: string; detail: string; slotIds: string[] }) => Promise<PdpcException | undefined>;
   onDeletePdpc?: (id: string) => Promise<void>;
   onOpenErph: (erph: ERPHData) => void;
@@ -94,14 +95,19 @@ const AutoRphCenter: React.FC<Props> = (p) => {
 };
 
 // ======================= TAB 1: JADUAL =======================
-const JadualTab: React.FC<Props> = ({ user, masterData, dskpDocs, rptDocs, timetable, onSaveTimetable, erphs }) => {
-  const [slots, setSlots] = useState<ScheduleSlot[]>(timetable.slots);
+const JadualTab: React.FC<Props> = ({ user, masterData, dskpDocs, rptDocs, timetable, onSaveTimetable, erphs, classSizes = {} }) => {
+  // Bilangan murid sentiasa ikut daftar sekolah terkini (elak nilai lama menimpa kemas kini guru lain)
+  const withShared = (list: ScheduleSlot[]) => list.map(s => {
+    const n = classSizes[classSizeKey(s.className, s.classTitle)]?.count;
+    return n ? { ...s, studentCount: n } : s;
+  });
+  const [slots, setSlots] = useState<ScheduleSlot[]>(() => withShared(timetable.slots));
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const blank: ScheduleSlot = { id: '', teacherId: user.id, day: 'ISNIN', startTime: '07:30', endTime: '08:30', subject: '', className: '', classTitle: '', studentCount: 0 };
   const [draft, setDraft] = useState<ScheduleSlot>(blank);
   const [editingId, setEditingId] = useState<string | null>(null);
-  useEffect(() => { if (!dirty) setSlots(timetable.slots); }, [timetable.slots]);
+  useEffect(() => { if (!dirty) setSlots(withShared(timetable.slots)); }, [timetable.slots, classSizes]);
 
   const subjects = useMemo(() => Array.from(new Set([...(masterData.subjects || []), ...dskpDocs.map(d => d.subject), ...rptDocs.map(d => d.subject), 'PENGURUSAN'])).filter(Boolean).sort(), [masterData.subjects, dskpDocs, rptDocs]);
   const forms = useMemo(() => Array.from(new Set([...Object.keys(masterData.classes || {}), ...dskpDocs.map(d => d.form), ...rptDocs.map(d => d.form), 'Tingkatan 1', 'Tingkatan 2', 'Tingkatan 3', 'Tingkatan 4', 'Tingkatan 5'])).filter(Boolean).sort(), [masterData.classes, dskpDocs, rptDocs]);
@@ -110,15 +116,19 @@ const JadualTab: React.FC<Props> = ({ user, masterData, dskpDocs, rptDocs, timet
   const set = (k: keyof ScheduleSlot, v: string) => setDraft(d => {
     const next: any = { ...d, [k]: k === 'studentCount' ? Number(v) || 0 : v };
     // Kelas yang sudah didaftarkan → isi bilangan murid secara automatik
-    if ((k === 'classTitle' || k === 'className') && !next.studentCount) {
-      const known = slots.find(s => s.classTitle && s.classTitle.trim().toUpperCase() === String(next.classTitle).trim().toUpperCase() && Number(s.studentCount) > 0);
-      if (known) next.studentCount = known.studentCount;
+    if (k === 'classTitle' || k === 'className') {
+      // Kelas sudah didaftarkan oleh mana-mana guru → guna bilangan murid yang sama
+      const shared = classSizes[classSizeKey(next.className, next.classTitle)]?.count;
+      const known = slots.find(s => s.classTitle && s.classTitle.trim().toUpperCase() === String(next.classTitle).trim().toUpperCase() && Number(s.studentCount) > 0)?.studentCount;
+      if (shared || (!next.studentCount && known)) next.studentCount = shared || known;
     }
     return next;
   });
   const isMgmtDraft = /^\s*pengurusan\s*$/i.test(draft.subject);
   const valid = draft.subject.trim() && draft.className.trim() && draft.startTime < draft.endTime && (isMgmtDraft || Number(draft.studentCount) > 0);
-  const missingCount = slots.filter(s => !/^\s*pengurusan\s*$/i.test(s.subject) && !(Number(s.studentCount) > 0));
+  const countOf = (s: ScheduleSlot) => enrolmentFor(classSizes, s.className, s.classTitle, s.studentCount);
+  const missingCount = slots.filter(s => !/^\s*pengurusan\s*$/i.test(s.subject) && !(countOf(s) > 0));
+  const sharedInfo = classSizes[classSizeKey(draft.className, draft.classTitle)];
   const commit = () => {
     if (!valid) return;
     setSlots(prev => {
@@ -179,6 +189,7 @@ const JadualTab: React.FC<Props> = ({ user, masterData, dskpDocs, rptDocs, timet
             <input type="number" min={0} max={200} className={`${input} ${!isMgmtDraft && !(Number(draft.studentCount) > 0) ? 'border-amber-300 bg-amber-50' : ''}`}
               value={draft.studentCount || ''} onChange={e => set('studentCount', e.target.value)} placeholder="30" /></div>
         </div>
+        {sharedInfo && <p className="text-[11px] text-emerald-700 mt-2">👥 Kelas ini sudah didaftarkan: <b>{sharedInfo.count} murid</b>{sharedInfo.updatedBy ? ` (oleh ${sharedInfo.updatedBy})` : ''}. Jika anda menukar nilai ini dan simpan, ia dikemas kini untuk <b>semua guru</b> kelas ini.</p>}
         {!isMgmtDraft && !(Number(draft.studentCount) > 0) && <p className="text-[11px] text-amber-700 mt-2">Masukkan bilangan murid kelas ini — digunakan untuk kehadiran (cth 28/30) dan refleksi RPH.</p>}
         <div className="flex flex-wrap gap-2 mt-4">
           <button onClick={commit} disabled={!valid} className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-600 text-white text-sm font-bold disabled:opacity-40">
@@ -218,7 +229,7 @@ const JadualTab: React.FC<Props> = ({ user, masterData, dskpDocs, rptDocs, timet
                       <p className="text-xs font-bold text-slate-900 leading-tight">{s.subject}</p>
                       <p className="text-[11px] text-slate-500">{s.className}{s.classTitle ? ` • ${s.classTitle}` : ''}</p>
                       {!/^\s*pengurusan\s*$/i.test(s.subject) && (
-                        <p className={`text-[10px] font-bold ${Number(s.studentCount) > 0 ? 'text-slate-600' : 'text-amber-600'}`}>👥 {Number(s.studentCount) > 0 ? `${s.studentCount} murid` : 'Bil. murid belum diisi'}</p>
+                        <p className={`text-[10px] font-bold ${countOf(s) > 0 ? 'text-slate-600' : 'text-amber-600'}`}>👥 {countOf(s) > 0 ? `${countOf(s)} murid` : 'Bil. murid belum diisi'}</p>
                       )}
                       <div className="flex items-center justify-between mt-1.5">
                         <div className="flex gap-1">

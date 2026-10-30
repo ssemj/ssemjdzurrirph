@@ -3,6 +3,7 @@
 // Guru boleh isi semua slot seminggu tanpa keluar-masuk borang.
 // Slot diambil daripada Jadual Waktu guru + RPH yang sudah disimpan.
 // ============================================================
+import { enrolmentFor } from '../services/autoRphCore';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { CalendarDays, CheckCircle2, AlertTriangle, Circle, Copy, Plus, X, SendHorizontal, ChevronRight, Clock, Sparkles, Loader2, Trash2 } from 'lucide-react';
 import ERPHForm from './ERPHForm';
@@ -55,6 +56,7 @@ interface Props {
   /** RPH / slot yang dipadam (status DELETED) — slot jadual tidak dipaparkan lagi */
   deletedErphs?: ERPHData[];
   pdpcExceptions?: PdpcException[];
+  classSizes?: Record<string, { count: number }>;
   onDelete?: (id: string) => void;
   onSkipSlot?: (data: ERPHData) => void;
   erphs: ERPHData[];
@@ -74,7 +76,7 @@ interface Props {
 }
 
 const WeeklyERPHEditor: React.FC<Props> = ({
-  user, masterData, dskpDocs = [], rptDocs = [], autoRun, onGenerateWeek, onStopAuto, deletedErphs = [], pdpcExceptions = [], onDelete, onSkipSlot, erphs, masterSchedule, initialErph, initialWeek, onSave, onSaveMany, calendar, onClose, onPreviewWeek,
+  user, masterData, dskpDocs = [], rptDocs = [], autoRun, onGenerateWeek, onStopAuto, deletedErphs = [], pdpcExceptions = [], classSizes = {}, onDelete, onSkipSlot, erphs, masterSchedule, initialErph, initialWeek, onSave, onSaveMany, calendar, onClose, onPreviewWeek,
 }) => {
   const isMine = (e: ERPHData) =>
     String(e.teacherId || '').trim().toLowerCase() === String(user.id || '').trim().toLowerCase() ||
@@ -165,7 +167,7 @@ const WeeklyERPHEditor: React.FC<Props> = ({
             startTime: s.startTime, endTime: s.endTime, subject: s.subject, className: s.className, classTitle: s.classTitle,
             field: '', title: '', sk: '', sp: '', core: '', objective: '', activities: '', bbm: 'Buku Teks', reflection: '',
             language: 'BM', status: ERPHStatus.DRAFT,
-            enrolment: Number(s.studentCount) > 0 ? Number(s.studentCount) : undefined,
+            enrolment: enrolmentFor(classSizes, s.className, s.classTitle, s.studentCount) || undefined,
           } as ERPHData,
         };
       });
@@ -493,6 +495,7 @@ const WeeklyERPHEditor: React.FC<Props> = ({
                 dskpDocs={dskpDocs}
                 rptDocs={rptDocs}
                 pdpcExceptions={pdpcExceptions}
+                classSizes={classSizes}
                 erphs={erphs}
                 masterSchedule={masterSchedule}
                 initialData={formInitial}

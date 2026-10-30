@@ -7,7 +7,7 @@ import {
   ShieldCheck, AlertCircle, Eye, ArrowUpRight, Download, ChevronRight, Info,
   LogOut, Loader2, X, MessageSquare, ChevronLeft, Calendar, BookOpen, BarChart3, Mail, Database,
   LayoutGrid, Layers, UserCheck, MessageCircle
-  , Image as ImageIcon, UserPlus
+  , Image as ImageIcon, UserPlus, Megaphone
 } from 'lucide-react';
 import SignaturePad from './SignaturePad';
 import ERPHPreview from './ERPHPreview';
@@ -22,6 +22,7 @@ import DSKPUploader from './DSKPUploader';
 import AcademicCalendarSettings from './AcademicCalendarSettings';
 import SchoolBrandingSettings from './SchoolBrandingSettings';
 import TeacherRegistration from './TeacherRegistration';
+import AnnouncementAdmin from './AnnouncementAdmin';
 import { NewTeacher } from '../services/teacherService';
 
 interface AdminDashboardProps {
@@ -57,6 +58,7 @@ const UTILITY_MENUS = [
   { id: 'RPT', label: 'RPT', icon: BookOpen, color: 'bg-indigo-600' },
   { id: 'DSKP_COLL', label: 'DSKP', icon: Layers, color: 'bg-violet-600' },
   { id: 'UPLOAD_DSKP', label: 'Muat Naik DSKP', icon: Database, color: 'bg-emerald-600' },
+  { id: 'PESANAN', label: 'Papan Pesanan Guru', icon: Megaphone, color: 'bg-rose-600' },
   { id: 'DAFTAR_GURU', label: 'Daftar Guru Baharu', icon: UserPlus, color: 'bg-teal-600' },
   { id: 'KALENDAR', label: 'Kalendar Akademik', icon: Calendar, color: 'bg-sky-600' },
   { id: 'LOGO', label: 'Logo Sekolah', icon: ImageIcon, color: 'bg-indigo-600' },
@@ -242,7 +244,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const dskpPanelRef = useRef<HTMLDivElement>(null);
   // Skrol ke panel Muat Naik DSKP sekali sahaja bila ia dibuka
   useEffect(() => {
-    if (activeResView === 'UPLOAD_DSKP' || activeResView === 'KALENDAR' || activeResView === 'LOGO' || activeResView === 'DAFTAR_GURU') {
+    if (activeResView === 'UPLOAD_DSKP' || activeResView === 'KALENDAR' || activeResView === 'LOGO' || activeResView === 'DAFTAR_GURU' || activeResView === 'PESANAN') {
       setTimeout(() => dskpPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 80);
     }
   }, [activeResView]);
@@ -858,7 +860,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
             ))}
          </div>
 
-         {activeResView && activeResView !== 'UPLOAD_DSKP' && activeResView !== 'KALENDAR' && activeResView !== 'LOGO' && activeResView !== 'DAFTAR_GURU' && (
+         {activeResView && activeResView !== 'UPLOAD_DSKP' && activeResView !== 'KALENDAR' && activeResView !== 'LOGO' && activeResView !== 'DAFTAR_GURU' && activeResView !== 'PESANAN' && (
            <ResourceCenter 
              viewId={activeResView}
              label={UTILITY_MENUS.find(m => m.id === activeResView)?.label || ''}
@@ -870,6 +872,16 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
              onClose={() => setActiveResView(null)}
              isAdmin={true}
            />
+         )}
+
+         {activeResView === 'PESANAN' && (
+           <div className="relative scroll-mt-24" ref={dskpPanelRef}>
+             <button onClick={() => setActiveResView(null)}
+               className="absolute top-4 right-4 z-10 p-2 bg-white rounded-full shadow-md text-slate-400 hover:text-red-500 transition-all">
+               <X size={20} />
+             </button>
+             <AnnouncementAdmin teachers={teachers} userName={user.name} />
+           </div>
          )}
 
          {activeResView === 'DAFTAR_GURU' && onSaveTeacher && onDeleteTeacher && (
