@@ -36,7 +36,7 @@ const Register: React.FC<RegisterProps> = ({ onSelectRole, teachers, isLoading, 
   };
 
   const handleAdminLogin = () => {
-    const correctPassword = import.meta.env.VITE_ADMIN_PASSWORD || 'dzurri';
+    const correctPassword = import.meta.env.VITE_ADMIN_PASSWORD || 'dzurrihensem';
     if (adminPassword === correctPassword) {
       onSelectRole(UserRole.ADMIN);
     } else {
@@ -76,7 +76,7 @@ const Register: React.FC<RegisterProps> = ({ onSelectRole, teachers, isLoading, 
     }
     
     const inputLogin = loginId.trim();
-    const adminPassword = import.meta.env.VITE_ADMIN_PASSWORD || 'dzurri';
+    const adminPassword = import.meta.env.VITE_ADMIN_PASSWORD || 'dzurrihensem';
     
     if ((inputLogin === actualLogin && actualLogin !== '') || inputLogin === adminPassword) {
       onSelectRole(UserRole.GURU, selectedTeacher);

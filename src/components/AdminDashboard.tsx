@@ -7,7 +7,7 @@ import {
   ShieldCheck, AlertCircle, Eye, ArrowUpRight, Download, ChevronRight, Info,
   LogOut, Loader2, X, MessageSquare, ChevronLeft, Calendar, BookOpen, BarChart3, Mail, Database,
   LayoutGrid, Layers, UserCheck, MessageCircle
-  , Image as ImageIcon
+  , Image as ImageIcon, UserPlus
 } from 'lucide-react';
 import SignaturePad from './SignaturePad';
 import ERPHPreview from './ERPHPreview';
@@ -21,6 +21,8 @@ import ResourceCenter from './ResourceCenter';
 import DSKPUploader from './DSKPUploader';
 import AcademicCalendarSettings from './AcademicCalendarSettings';
 import SchoolBrandingSettings from './SchoolBrandingSettings';
+import TeacherRegistration from './TeacherRegistration';
+import { NewTeacher } from '../services/teacherService';
 
 interface AdminDashboardProps {
   user: UserProfile;
@@ -35,6 +37,10 @@ interface AdminDashboardProps {
   onReviewBundles?: (bundleIds: string[], status: string, comment: string, signature: string, reviewedBy: string, reviewerDesignation?: string, onProgress?: (done: number, total: number) => void) => Promise<void>;
   /** Buka RPH hantaran (PDF rasmi dijana semula) bila tiada pautan PDF Google Drive */
   onViewBundle?: (bundle: WeeklyBundle) => void;
+  /** Pendaftaran guru baharu (Firebase) */
+  fsTeachers?: NewTeacher[];
+  onSaveTeacher?: (t: NewTeacher) => Promise<NewTeacher>;
+  onDeleteTeacher?: (login: string) => Promise<void>;
   onSyncMaster: (data: MasterData) => Promise<boolean>;
   onRefresh: () => Promise<void>;
   onLogout: () => void;
@@ -51,6 +57,7 @@ const UTILITY_MENUS = [
   { id: 'RPT', label: 'RPT', icon: BookOpen, color: 'bg-indigo-600' },
   { id: 'DSKP_COLL', label: 'DSKP', icon: Layers, color: 'bg-violet-600' },
   { id: 'UPLOAD_DSKP', label: 'Muat Naik DSKP', icon: Database, color: 'bg-emerald-600' },
+  { id: 'DAFTAR_GURU', label: 'Daftar Guru Baharu', icon: UserPlus, color: 'bg-teal-600' },
   { id: 'KALENDAR', label: 'Kalendar Akademik', icon: Calendar, color: 'bg-sky-600' },
   { id: 'LOGO', label: 'Logo Sekolah', icon: ImageIcon, color: 'bg-indigo-600' },
   { id: 'ANALYSIS', label: 'Analisis', icon: BarChart3, color: 'bg-purple-600' },
@@ -228,14 +235,14 @@ const TeacherInfoCard: React.FC<{ teacher: any; bundles: WeeklyBundle[]; onBack:
 };
 
 const AdminDashboard: React.FC<AdminDashboardProps> = ({ 
-  user, teachers, erphs, bundles, masterData, setMasterData, onReview, onReviewBundle, onReviewBundles, onViewBundle, onSyncMaster, onRefresh, onLogout, onNavigate, onLoginAsTeacher, onAddResource, onDeleteResource, onDskpUpdated, onCalendarUpdated
+  user, teachers, erphs, bundles, masterData, setMasterData, onReview, onReviewBundle, onReviewBundles, onViewBundle, fsTeachers = [], onSaveTeacher, onDeleteTeacher, onSyncMaster, onRefresh, onLogout, onNavigate, onLoginAsTeacher, onAddResource, onDeleteResource, onDskpUpdated, onCalendarUpdated
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [activeResView, setActiveResView] = useState<string | null>(null);
   const dskpPanelRef = useRef<HTMLDivElement>(null);
   // Skrol ke panel Muat Naik DSKP sekali sahaja bila ia dibuka
   useEffect(() => {
-    if (activeResView === 'UPLOAD_DSKP' || activeResView === 'KALENDAR' || activeResView === 'LOGO') {
+    if (activeResView === 'UPLOAD_DSKP' || activeResView === 'KALENDAR' || activeResView === 'LOGO' || activeResView === 'DAFTAR_GURU') {
       setTimeout(() => dskpPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 80);
     }
   }, [activeResView]);
@@ -851,7 +858,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
             ))}
          </div>
 
-         {activeResView && activeResView !== 'UPLOAD_DSKP' && activeResView !== 'KALENDAR' && activeResView !== 'LOGO' && (
+         {activeResView && activeResView !== 'UPLOAD_DSKP' && activeResView !== 'KALENDAR' && activeResView !== 'LOGO' && activeResView !== 'DAFTAR_GURU' && (
            <ResourceCenter 
              viewId={activeResView}
              label={UTILITY_MENUS.find(m => m.id === activeResView)?.label || ''}
@@ -863,6 +870,16 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
              onClose={() => setActiveResView(null)}
              isAdmin={true}
            />
+         )}
+
+         {activeResView === 'DAFTAR_GURU' && onSaveTeacher && onDeleteTeacher && (
+           <div className="relative scroll-mt-24" ref={dskpPanelRef}>
+             <button onClick={() => setActiveResView(null)}
+               className="absolute top-4 right-4 z-10 p-2 bg-white rounded-full shadow-md text-slate-400 hover:text-red-500 transition-all">
+               <X size={20} />
+             </button>
+             <TeacherRegistration fsTeachers={fsTeachers} existingTeachers={teachers} onSave={onSaveTeacher} onDelete={onDeleteTeacher} />
+           </div>
          )}
 
          {activeResView === 'LOGO' && (

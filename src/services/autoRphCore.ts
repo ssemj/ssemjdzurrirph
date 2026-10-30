@@ -8,7 +8,7 @@
 //                         DSKP        → Standard Prestasi & Catatan (konteks AI)
 // Semua masa dikira dalam waktu Malaysia (UTC+8, tiada DST).
 // ============================================================
-import type { AcademicCalendar, DskpDocument, DskpRow, ERPHData, RptDocument, RptRow, ScheduleSlot } from '../types';
+import type { AcademicCalendar, DskpDocument, DskpRow, ERPHData, PdpcException, RptDocument, RptRow, ScheduleSlot } from '../types';
 
 export const MYT_OFFSET_MS = 8 * 3600 * 1000;
 export const DAY_NAMES = ['AHAD', 'ISNIN', 'SELASA', 'RABU', 'KHAMIS', 'JUMAAT', 'SABTU'];
@@ -220,3 +220,9 @@ export const durationLabel = (start: string, end: string) => {
   const m = toMin(end) - toMin(start);
   return m > 0 ? `${m} minit` : '';
 };
+
+/** PdPC tidak dapat dijalankan (kursus, MC ...) yang meliputi tarikh (dan slot, jika dihadkan). */
+export function exceptionFor(list: PdpcException[] | undefined, date?: string, slotId?: string): PdpcException | undefined {
+  if (!date || !list?.length) return undefined;
+  return list.find(x => date >= x.startDate && date <= (x.endDate || x.startDate) && (!x.slotIds?.length || (!!slotId && x.slotIds.includes(slotId))));
+}

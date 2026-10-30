@@ -24,10 +24,13 @@
     "noEmit": true
   },
   "exclude": [
-    "node_modules",
-    "functions",
-    "_backup_sebelum_autorph_2026-10-08",
     "Claude outputs",
-    "dist"
+    "UPLOAD_KE_GITHUB",
+    "_backup_sebelum_autorph_2026-10-08",
+    "dist",
+    "functions",
+    "node_modules",
+    "scripts",
+    "smart-rph"
   ]
 }

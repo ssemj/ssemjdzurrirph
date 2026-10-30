@@ -1,5 +1,5 @@
 import { initializeApp } from "firebase/app";
-import { getFirestore } from "firebase/firestore";
+import { initializeFirestore } from "firebase/firestore";
 
 // Kod rahsia Cikgu (Dah masukkan yang betul)
 const firebaseConfig = {
@@ -16,4 +16,5 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 
 // 2. Export database Firestore (Ini yang App.tsx cari!)
-export const db = getFirestore(app);
+// ignoreUndefinedProperties: medan `undefined` diabaikan (elak ralat "Unsupported field value: undefined")
+export const db = initializeFirestore(app, { ignoreUndefinedProperties: true });

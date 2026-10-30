@@ -19,6 +19,7 @@ export interface ScheduleSlot {
   subject: string;
   className: string;
   classTitle: string;
+  studentCount?: number;   // bilangan murid berdaftar dalam kelas ini
 }
 
 export interface UserProfile {
@@ -131,7 +132,12 @@ export interface ERPHData {
   generatedAt?: string;
   generatedBy?: 'AUTO_24J' | 'TRIGGER' | 'CLOUD';
   generatedFrom?: string;
-  bundledInWeek?: number;   // Isnin ini telah dihantar bersama hantaran minggu sebelumnya (Isnin→Isnin)
+  bundledInWeek?: number;
+  // Kehadiran murid: attendance / enrolment (cth 28/30)
+  attendance?: number | string;
+  enrolment?: number;
+  sharedFrom?: string;      // nama guru yang berkongsi
+  pdpcExceptionId?: string; // PdPC ditunda (kursus, MC, dll)   // Isnin ini telah dihantar bersama hantaran minggu sebelumnya (Isnin→Isnin)
 }
 
 export interface ReviewerProfile {
@@ -249,4 +255,18 @@ export interface AutoGenMeta {
   generatedAt?: string;
   generatedBy?: 'AUTO_24J' | 'TRIGGER' | 'CLOUD';
   generatedFrom?: string;   // cth "RPT M12 • DSKP"
+}
+
+// ===== PdPC TIDAK DAPAT DIJALANKAN (Firestore: pdpc_exceptions/{id}) =====
+export interface PdpcException {
+  id: string;
+  teacherId: string;
+  teacherName: string;
+  startDate: string;        // yyyy-mm-dd
+  endDate: string;          // yyyy-mm-dd (termasuk)
+  reason: string;           // Berkursus, Cuti Bencana, PdPR, CRK, MC, Peperiksaan, Lain-lain
+  detail?: string;          // cth "Kursus DSKP Seni Muzik di IPG"
+  slotIds?: string[];       // kosong = semua kelas pada tarikh tersebut
+  reflectionText: string;   // ayat refleksi dijana AI
+  createdAt?: string;
 }

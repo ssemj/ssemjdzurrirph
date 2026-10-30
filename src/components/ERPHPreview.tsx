@@ -159,7 +159,7 @@ const ERPHPreview: React.FC<ERPHPreviewProps> = ({ erphs, onBack, onSubmit, hide
                 <td className={`p-3 font-bold bg-slate-50 w-[15%] uppercase text-center text-slate-500 ${isPendidikanIslam ? 'font-jawi text-lg' : ''}`}>
                   {labels.class}
                 </td>
-                <td className="p-3 font-semibold uppercase text-slate-800">{erph.className} ({erph.classTitle})</td>
+                <td className="p-3 font-semibold uppercase text-slate-800">{erph.className} ({erph.classTitle}){Number(erph.enrolment) > 0 && <span className="block text-[11px] font-bold normal-case text-slate-500 mt-0.5">Kehadiran: {String(erph.attendance ?? '').trim() || '___'}/{erph.enrolment} murid</span>}</td>
               </tr>
               <tr className="border-b border-slate-200">
                 <td className={`p-3 font-bold bg-slate-50 w-[25%] uppercase text-slate-500 ${isPendidikanIslam ? 'font-jawi text-lg' : ''}`}>

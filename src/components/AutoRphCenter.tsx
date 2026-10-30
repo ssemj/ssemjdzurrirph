@@ -7,15 +7,16 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChevronLeft, CalendarDays, FileSpreadsheet, Bot, Plus, Trash2, Save, Pencil, Upload, Loader2, Sparkles,
-  CheckCircle2, XCircle, AlertTriangle, Download, X, Clock, Info, Copy,
+  CheckCircle2, XCircle, AlertTriangle, Download, X, Clock, Info, Copy, CalendarX,
 } from 'lucide-react';
 import {
-  AcademicCalendar, AutoPilotSettings, DskpDocument, ERPHData, MasterData, RptDocument, RptRow, ScheduleSlot, TeacherTimetable, UserProfile,
+  AcademicCalendar, AutoPilotSettings, DskpDocument, ERPHData, MasterData, PdpcException, RptDocument, RptRow, ScheduleSlot, TeacherTimetable, UserProfile,
 } from '../types';
+import { PDPC_REASONS, reasonLabel } from '../services/pdpcService';
 import SchoolTimetableGrid from './SchoolTimetableGrid';
 import { formatTime } from '../constants';
 import {
-  DAY_LABEL, findDskpDoc, findExisting, findRptDoc, lastSpFor, lessonPosition, mytDateStr, normDay, planLesson, weekOfDate,
+  DAY_LABEL, dayNameOf, addDaysStr, findDskpDoc, findExisting, findRptDoc, lastSpFor, lessonPosition, mytDateStr, normDay, planLesson, weekOfDate,
 } from '../services/autoRphCore';
 import { plannedOccurrences } from '../services/autoRphRunner';
 import { extractRpt, saveRpt, deleteRpt, cleanRptRows } from '../services/rptService';
@@ -23,7 +24,7 @@ import { getGeminiKey } from '../services/geminiService';
 import type { AutoResult } from '../services/autoRphGenerate';
 import type { AutoRunState } from './AutoRphTodayCard';
 
-export type CenterTab = 'JADUAL' | 'RPT' | 'AUTO';
+export type CenterTab = 'JADUAL' | 'RPT' | 'AUTO' | 'PDPC';
 const DAYS = ['ISNIN', 'SELASA', 'RABU', 'KHAMIS', 'JUMAAT'];
 const newId = () => 'slot_' + Math.random().toString(36).slice(2, 10);
 
@@ -45,6 +46,9 @@ interface Props {
   onRunWindow: () => void;
   onGenerateWeek: (date: string) => void;
   onStop: () => void;
+  pdpcExceptions?: PdpcException[];
+  onSavePdpc?: (input: { startDate: string; endDate: string; reason: string; detail: string; slotIds: string[] }) => Promise<PdpcException | undefined>;
+  onDeletePdpc?: (id: string) => Promise<void>;
   onOpenErph: (erph: ERPHData) => void;
   onBack: () => void;
 }
@@ -61,6 +65,7 @@ const AutoRphCenter: React.FC<Props> = (p) => {
     { id: 'JADUAL', label: '1. Jadual Waktu', icon: CalendarDays },
     { id: 'RPT', label: '2. RPT', icon: FileSpreadsheet },
     { id: 'AUTO', label: '3. Auto-Jana RPH', icon: Bot },
+    { id: 'PDPC', label: 'PdPC Tidak Dijalankan', icon: CalendarX },
   ];
 
   return (
@@ -83,6 +88,7 @@ const AutoRphCenter: React.FC<Props> = (p) => {
       {tab === 'JADUAL' && <JadualTab {...p} />}
       {tab === 'RPT' && <RptTab {...p} />}
       {tab === 'AUTO' && <AutoTab {...p} />}
+      {tab === 'PDPC' && <PdpcTab {...p} />}
     </div>
   );
 };
@@ -92,7 +98,7 @@ const JadualTab: React.FC<Props> = ({ user, masterData, dskpDocs, rptDocs, timet
   const [slots, setSlots] = useState<ScheduleSlot[]>(timetable.slots);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
-  const blank: ScheduleSlot = { id: '', teacherId: user.id, day: 'ISNIN', startTime: '07:30', endTime: '08:30', subject: '', className: '', classTitle: '' };
+  const blank: ScheduleSlot = { id: '', teacherId: user.id, day: 'ISNIN', startTime: '07:30', endTime: '08:30', subject: '', className: '', classTitle: '', studentCount: 0 };
   const [draft, setDraft] = useState<ScheduleSlot>(blank);
   const [editingId, setEditingId] = useState<string | null>(null);
   useEffect(() => { if (!dirty) setSlots(timetable.slots); }, [timetable.slots]);
@@ -101,11 +107,26 @@ const JadualTab: React.FC<Props> = ({ user, masterData, dskpDocs, rptDocs, timet
   const forms = useMemo(() => Array.from(new Set([...Object.keys(masterData.classes || {}), ...dskpDocs.map(d => d.form), ...rptDocs.map(d => d.form), 'Tingkatan 1', 'Tingkatan 2', 'Tingkatan 3', 'Tingkatan 4', 'Tingkatan 5'])).filter(Boolean).sort(), [masterData.classes, dskpDocs, rptDocs]);
   const classOptions = (masterData.classes || {})[draft.className] || [];
 
-  const set = (k: keyof ScheduleSlot, v: string) => setDraft(d => ({ ...d, [k]: v }));
-  const valid = draft.subject.trim() && draft.className.trim() && draft.startTime < draft.endTime;
+  const set = (k: keyof ScheduleSlot, v: string) => setDraft(d => {
+    const next: any = { ...d, [k]: k === 'studentCount' ? Number(v) || 0 : v };
+    // Kelas yang sudah didaftarkan → isi bilangan murid secara automatik
+    if ((k === 'classTitle' || k === 'className') && !next.studentCount) {
+      const known = slots.find(s => s.classTitle && s.classTitle.trim().toUpperCase() === String(next.classTitle).trim().toUpperCase() && Number(s.studentCount) > 0);
+      if (known) next.studentCount = known.studentCount;
+    }
+    return next;
+  });
+  const isMgmtDraft = /^\s*pengurusan\s*$/i.test(draft.subject);
+  const valid = draft.subject.trim() && draft.className.trim() && draft.startTime < draft.endTime && (isMgmtDraft || Number(draft.studentCount) > 0);
+  const missingCount = slots.filter(s => !/^\s*pengurusan\s*$/i.test(s.subject) && !(Number(s.studentCount) > 0));
   const commit = () => {
     if (!valid) return;
-    setSlots(prev => editingId ? prev.map(s => s.id === editingId ? { ...draft, id: editingId } : s) : [...prev, { ...draft, id: newId() }]);
+    setSlots(prev => {
+      const list = editingId ? prev.map(s => s.id === editingId ? { ...draft, id: editingId } : s) : [...prev, { ...draft, id: newId() }];
+      // Bilangan murid sama bagi semua slot kelas yang sama
+      const key = String(draft.classTitle || '').trim().toUpperCase();
+      return key && Number(draft.studentCount) > 0 ? list.map(s => String(s.classTitle || '').trim().toUpperCase() === key ? { ...s, studentCount: draft.studentCount } : s) : list;
+    });
     setDraft(d => ({ ...d, startTime: d.endTime, endTime: addMinutes(d.endTime, 60), id: '' }));
     setEditingId(null); setDirty(true);
   };
@@ -140,7 +161,7 @@ const JadualTab: React.FC<Props> = ({ user, masterData, dskpDocs, rptDocs, timet
       <div className={card}>
         <h2 className="font-extrabold text-slate-900 mb-1">{editingId ? 'Kemaskini slot' : 'Tambah slot mengajar'}</h2>
         <p className="text-xs text-slate-500 mb-4">Tingkatan mesti sama dengan Tingkatan pada DSKP/RPT (cth "Tingkatan 1") supaya AI boleh padankan.</p>
-        <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-7 gap-3">
           <div><span className={label}>Hari</span>
             <select className={input} value={normDay(draft.day)} onChange={e => set('day', e.target.value)}>{DAYS.map(d => <option key={d} value={d}>{DAY_LABEL[d]}</option>)}</select></div>
           <div><span className={label}>Mula</span><input type="time" className={input} value={draft.startTime} onChange={e => set('startTime', e.target.value)} /></div>
@@ -154,7 +175,11 @@ const JadualTab: React.FC<Props> = ({ user, masterData, dskpDocs, rptDocs, timet
           <div><span className={label}>Kelas</span>
             <input list="autorph-classes" className={input} value={draft.classTitle} onChange={e => set('classTitle', e.target.value)} placeholder="1 Bestari" />
             <datalist id="autorph-classes">{classOptions.map(s => <option key={s} value={s} />)}</datalist></div>
+          <div><span className={label}>Bil. Murid{isMgmtDraft ? '' : ' *'}</span>
+            <input type="number" min={0} max={200} className={`${input} ${!isMgmtDraft && !(Number(draft.studentCount) > 0) ? 'border-amber-300 bg-amber-50' : ''}`}
+              value={draft.studentCount || ''} onChange={e => set('studentCount', e.target.value)} placeholder="30" /></div>
         </div>
+        {!isMgmtDraft && !(Number(draft.studentCount) > 0) && <p className="text-[11px] text-amber-700 mt-2">Masukkan bilangan murid kelas ini — digunakan untuk kehadiran (cth 28/30) dan refleksi RPH.</p>}
         <div className="flex flex-wrap gap-2 mt-4">
           <button onClick={commit} disabled={!valid} className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-600 text-white text-sm font-bold disabled:opacity-40">
             {editingId ? <Pencil size={15} /> : <Plus size={15} />}{editingId ? 'Kemaskini' : 'Tambah'}
@@ -169,6 +194,7 @@ const JadualTab: React.FC<Props> = ({ user, masterData, dskpDocs, rptDocs, timet
           <div>
             <h2 className="font-extrabold text-slate-900">Jadual mingguan ({slots.length} slot)</h2>
             <p className="text-xs text-slate-500">Lencana menunjukkan sama ada RPT dan DSKP tersedia untuk Subjek + Tingkatan tersebut.</p>
+            {missingCount.length > 0 && <p className="text-xs font-semibold text-amber-700 mt-1">⚠ {missingCount.length} slot belum ada bilangan murid — klik ✏ untuk lengkapkan.</p>}
           </div>
           <button onClick={save} disabled={!dirty || saving} className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-emerald-600 text-white text-sm font-bold disabled:opacity-40">
             {saving ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}{dirty ? 'Simpan Jadual' : 'Tersimpan'}
@@ -191,6 +217,9 @@ const JadualTab: React.FC<Props> = ({ user, masterData, dskpDocs, rptDocs, timet
                       <p className="text-[10px] font-bold text-slate-500">{formatTime(s.startTime)}–{formatTime(s.endTime)}</p>
                       <p className="text-xs font-bold text-slate-900 leading-tight">{s.subject}</p>
                       <p className="text-[11px] text-slate-500">{s.className}{s.classTitle ? ` • ${s.classTitle}` : ''}</p>
+                      {!/^\s*pengurusan\s*$/i.test(s.subject) && (
+                        <p className={`text-[10px] font-bold ${Number(s.studentCount) > 0 ? 'text-slate-600' : 'text-amber-600'}`}>👥 {Number(s.studentCount) > 0 ? `${s.studentCount} murid` : 'Bil. murid belum diisi'}</p>
+                      )}
                       <div className="flex items-center justify-between mt-1.5">
                         <div className="flex gap-1">
                           <Badge ok={hasRpt} t="RPT" /><Badge ok={hasDskp} t="DSKP" />
@@ -512,6 +541,98 @@ const AutoTab: React.FC<Props> = ({ user, timetable, onSaveTimetable, calendar, 
         <p>• Untuk penjanaan 24/7 walaupun aplikasi ditutup, Admin boleh aktifkan Cloud Function berjadual (lihat AUTO-RPH-PANDUAN.md).</p>
         <p>• Hantaran mingguan ialah <b>Isnin → Isnin minggu hadapan</b>. Mulai Khamis, AI turut menyiapkan RPH Isnin minggu hadapan (disimpan di minggu seterusnya, <b>tanpa refleksi</b>).</p>
         <p>• RPH dijana berstatus <b>Draf</b> — guru boleh semak, sunting dan hantar seperti biasa.</p>
+      </div>
+    </div>
+  );
+};
+
+// ======================= TAB 4: PdPC TIDAK DIJALANKAN =======================
+const PdpcTab: React.FC<Props> = ({ timetable, pdpcExceptions = [], onSavePdpc, onDeletePdpc, erphs, user }) => {
+  const today = mytDateStr(Date.now());
+  const [startDate, setStartDate] = useState(today);
+  const [endDate, setEndDate] = useState(today);
+  const [reason, setReason] = useState('KURSUS');
+  const [detail, setDetail] = useState('');
+  const [allSlots, setAllSlots] = useState(true);
+  const [slotIds, setSlotIds] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState('');
+
+  // Slot jadual yang jatuh dalam julat tarikh (untuk pilihan "kelas tertentu sahaja")
+  const daysInRange = useMemo(() => {
+    const out = new Set<string>();
+    let d = startDate; let guard = 0;
+    while (d && d <= (endDate || startDate) && guard++ < 40) { out.add(dayNameOf(d)); d = addDaysStr(d, 1); }
+    return out;
+  }, [startDate, endDate]);
+  const slotsInRange = timetable.slots.filter(s => daysInRange.has(normDay(s.day)));
+  const affectedCount = erphs.filter(e => String(e.teacherId).toLowerCase() === user.id.toLowerCase() && e.date >= startDate && e.date <= (endDate || startDate)).length;
+
+  const save = async () => {
+    if (!onSavePdpc) return;
+    if (reason === 'LAIN' && !detail.trim()) { setMsg('Sila nyatakan butiran untuk "Lain-lain".'); return; }
+    setBusy(true); setMsg('Gemini sedang menyediakan ayat refleksi...');
+    try {
+      const saved = await onSavePdpc({ startDate, endDate: endDate < startDate ? startDate : endDate, reason, detail, slotIds: allSlots ? [] : slotIds });
+      setMsg(saved ? `✅ Disimpan. Refleksi: "${saved.reflectionText}"` : '');
+      setDetail(''); setSlotIds([]); setAllSlots(true);
+    } catch (e: any) { setMsg('Gagal simpan: ' + e.message); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className={card}>
+        <h2 className="font-extrabold text-slate-900 mb-1">PdPC tidak dapat dijalankan</h2>
+        <p className="text-xs text-slate-500 mb-4">Isi bila anda berkursus, MC, CRK, cuti bencana, PdPR, peperiksaan dan sebagainya. Ruangan <b>Refleksi</b> semua RPH dalam tarikh tersebut akan diisi secara automatik (contoh: <i>"PdPC ditunda kerana guru terlibat dengan kursus ..."</i>), termasuk RPH yang dijana AI kemudian.</p>
+        <div className="grid md:grid-cols-4 gap-3">
+          <div><span className={label}>Dari tarikh</span><input type="date" className={input} value={startDate} onChange={e => { setStartDate(e.target.value); if (endDate < e.target.value) setEndDate(e.target.value); }} /></div>
+          <div><span className={label}>Hingga tarikh</span><input type="date" className={input} value={endDate} min={startDate} onChange={e => setEndDate(e.target.value)} /></div>
+          <div className="md:col-span-2"><span className={label}>Sebab</span>
+            <select className={input} value={reason} onChange={e => setReason(e.target.value)}>
+              {PDPC_REASONS.map(r => <option key={r.id} value={r.id}>{r.label}</option>)}
+            </select></div>
+          <div className="md:col-span-4"><span className={label}>Butiran (pilihan, membantu AI menulis ayat yang tepat)</span>
+            <input className={input} value={detail} onChange={e => setDetail(e.target.value)} placeholder="cth: Kursus DSKP Seni Muzik di IPG Johor / Banjir di Kota Tinggi / Peperiksaan Akhir Tahun" /></div>
+        </div>
+        <div className="mt-4 space-y-2">
+          <label className="flex items-center gap-2 text-sm text-slate-700"><input type="checkbox" className="accent-indigo-600" checked={allSlots} onChange={e => setAllSlots(e.target.checked)} />Semua kelas pada tarikh tersebut</label>
+          {!allSlots && (
+            <div className="flex flex-wrap gap-2">
+              {slotsInRange.length === 0 && <span className="text-xs text-slate-400">Tiada slot jadual dalam julat tarikh ini.</span>}
+              {slotsInRange.map(s => (
+                <label key={s.id} className={`text-xs px-3 py-1.5 rounded-lg border cursor-pointer ${slotIds.includes(s.id) ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white border-slate-200 text-slate-700'}`}>
+                  <input type="checkbox" className="hidden" checked={slotIds.includes(s.id)} onChange={e => setSlotIds(prev => e.target.checked ? [...prev, s.id] : prev.filter(x => x !== s.id))} />
+                  {DAY_LABEL[normDay(s.day)]} {s.startTime} • {s.subject} {s.classTitle}
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="flex flex-wrap items-center gap-3 mt-5">
+          <button onClick={save} disabled={busy || !onSavePdpc || (!allSlots && !slotIds.length)} className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-rose-600 text-white text-sm font-bold disabled:opacity-50">
+            {busy ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}Simpan & kemas kini refleksi
+          </button>
+          {allSlots && <span className="text-xs text-slate-500">{affectedCount} RPH sedia ada dalam tarikh ini akan dikemas kini.</span>}
+        </div>
+        {msg && <p className="mt-3 text-xs font-semibold text-slate-700">{msg}</p>}
+      </div>
+
+      <div className={card}>
+        <h2 className="font-extrabold text-slate-900 mb-3">Rekod PdPC ditunda ({pdpcExceptions.length})</h2>
+        {pdpcExceptions.length === 0 ? <p className="text-sm text-slate-500">Tiada rekod.</p> : (
+          <div className="divide-y divide-slate-100">
+            {pdpcExceptions.map(x => (
+              <div key={x.id} className="py-3 flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-bold text-slate-900">{x.startDate.split('-').reverse().join('/')}{x.endDate !== x.startDate ? ` – ${x.endDate.split('-').reverse().join('/')}` : ''} • {reasonLabel(x.reason)}{x.slotIds?.length ? ` • ${x.slotIds.length} kelas` : ''}</p>
+                  <p className="text-xs text-slate-600 mt-0.5 italic">"{x.reflectionText}"</p>
+                </div>
+                {onDeletePdpc && <button onClick={async () => { if (confirm('Padam rekod ini? (Refleksi RPH yang telah dikemas kini tidak diubah)')) await onDeletePdpc(x.id); }} className="shrink-0 p-2 rounded-lg border border-rose-200 text-rose-600"><Trash2 size={13} /></button>}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

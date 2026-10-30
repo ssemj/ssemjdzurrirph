@@ -7,7 +7,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { CalendarDays, CheckCircle2, AlertTriangle, Circle, Copy, Plus, X, SendHorizontal, ChevronRight, Clock, Sparkles, Loader2, Trash2 } from 'lucide-react';
 import ERPHForm from './ERPHForm';
 import CopyRphModal, { CopyTarget, cleanCopy } from './CopyRphModal';
-import { AcademicCalendar, DskpDocument, ERPHData, ERPHStatus, MasterData, RptDocument, ScheduleSlot, UserProfile } from '../types';
+import { AcademicCalendar, DskpDocument, ERPHData, ERPHStatus, MasterData, PdpcException, RptDocument, ScheduleSlot, UserProfile } from '../types';
 import { weekToMonday, dateToWeek, holidayOn } from '../services/calendarService';
 import { WEEKS } from '../constants';
 
@@ -54,6 +54,7 @@ interface Props {
   onStopAuto?: () => void;
   /** RPH / slot yang dipadam (status DELETED) — slot jadual tidak dipaparkan lagi */
   deletedErphs?: ERPHData[];
+  pdpcExceptions?: PdpcException[];
   onDelete?: (id: string) => void;
   onSkipSlot?: (data: ERPHData) => void;
   erphs: ERPHData[];
@@ -73,7 +74,7 @@ interface Props {
 }
 
 const WeeklyERPHEditor: React.FC<Props> = ({
-  user, masterData, dskpDocs = [], rptDocs = [], autoRun, onGenerateWeek, onStopAuto, deletedErphs = [], onDelete, onSkipSlot, erphs, masterSchedule, initialErph, initialWeek, onSave, onSaveMany, calendar, onClose, onPreviewWeek,
+  user, masterData, dskpDocs = [], rptDocs = [], autoRun, onGenerateWeek, onStopAuto, deletedErphs = [], pdpcExceptions = [], onDelete, onSkipSlot, erphs, masterSchedule, initialErph, initialWeek, onSave, onSaveMany, calendar, onClose, onPreviewWeek,
 }) => {
   const isMine = (e: ERPHData) =>
     String(e.teacherId || '').trim().toLowerCase() === String(user.id || '').trim().toLowerCase() ||
@@ -164,6 +165,7 @@ const WeeklyERPHEditor: React.FC<Props> = ({
             startTime: s.startTime, endTime: s.endTime, subject: s.subject, className: s.className, classTitle: s.classTitle,
             field: '', title: '', sk: '', sp: '', core: '', objective: '', activities: '', bbm: 'Buku Teks', reflection: '',
             language: 'BM', status: ERPHStatus.DRAFT,
+            enrolment: Number(s.studentCount) > 0 ? Number(s.studentCount) : undefined,
           } as ERPHData,
         };
       });
@@ -490,6 +492,7 @@ const WeeklyERPHEditor: React.FC<Props> = ({
                 masterData={masterData}
                 dskpDocs={dskpDocs}
                 rptDocs={rptDocs}
+                pdpcExceptions={pdpcExceptions}
                 erphs={erphs}
                 masterSchedule={masterSchedule}
                 initialData={formInitial}

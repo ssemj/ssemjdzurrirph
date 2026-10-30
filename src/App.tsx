@@ -1,14 +1,17 @@
 import { db } from "./firebaseConfig";
 
-import { collection, addDoc, serverTimestamp, getDocs, query, where, orderBy, limit, doc, setDoc } from "firebase/firestore";
+import { collection, addDoc, serverTimestamp, getDocs, query, where, orderBy, limit, doc, setDoc, writeBatch } from "firebase/firestore";
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { UserProfile, UserRole, ERPHData, ERPHStatus, MasterData, Resource, WeeklyBundle, AppNotification, ScheduleSlot, DskpDocument, AcademicCalendar, RptDocument, TeacherTimetable } from './types';
+import { UserProfile, UserRole, ERPHData, ERPHStatus, MasterData, Resource, WeeklyBundle, AppNotification, ScheduleSlot, DskpDocument, AcademicCalendar, RptDocument, TeacherTimetable, PdpcException } from './types';
 import { loadTimetable, saveTimetable, DEFAULT_AUTOPILOT } from './services/timetableService';
 import { loadAllRpt } from './services/rptService';
 import { BundleReviewDoc, loadBundleReviews, loadSignatures, overlayBundles, overlayErphs, parseRphIds, reviewBundlesFs, saveSubmissionFs, cancelBundleFs, dedupeBundles, weekNumOf, isBundleReviewed } from './services/reviewService';
 import { runAutoRph } from './services/autoRphRunner';
 import { dayNameOf as dayNameOfDate, autoErphId as autoErphIdOf } from './services/autoRphCore';
 import { getGeminiKey } from './services/geminiService';
+import { loadFirebaseTeachers, saveFirebaseTeacher, deleteFirebaseTeacher, toRegistryRow, NewTeacher } from './services/teacherService';
+import { loadExceptions, saveException, deleteException, generateExceptionReflection } from './services/pdpcService';
+import { exceptionFor } from './services/autoRphCore';
 import type { AutoResult } from './services/autoRphGenerate';
 import AutoRphTodayCard, { AutoRunState } from './components/AutoRphTodayCard';
 import type { CenterTab } from './components/AutoRphCenter';
@@ -126,6 +129,12 @@ const App: React.FC = () => {
   const [deletedErphs, setDeletedErphs] = useState<ERPHData[]>([]);
   // ===== SEMAKAN (Firebase weekly_bundles) — mengatasi status dari Google Sheet =====
   const [fsReviews, setFsReviews] = useState<BundleReviewDoc[]>([]);
+  // PdPC tidak dapat dijalankan (kursus, MC, cuti bencana ...) — Firestore pdpc_exceptions
+  const [pdpcExceptions, setPdpcExceptions] = useState<PdpcException[]>([]);
+  const reloadPdpc = useCallback(async (u: UserProfile | null) => {
+    if (!u) return;
+    try { setPdpcExceptions(await loadExceptions(u.id)); } catch (e) { console.warn('Gagal memuatkan PdPC ditunda:', e); }
+  }, []);
   const [signatures, setSignatures] = useState<Record<string, string>>({});
   const [overlayTick, setOverlayTick] = useState(0);
   const reloadReviews = useCallback(async (u: UserProfile | null) => {
@@ -176,10 +185,21 @@ const App: React.FC = () => {
     return url;
   };
 
+  // Guru baharu yang didaftarkan Admin di Firebase (digabung dengan senarai Google Sheet)
+  const [fsTeachers, setFsTeachers] = useState<NewTeacher[]>([]);
+  const reloadFsTeachers = useCallback(async () => {
+    try { setFsTeachers(await loadFirebaseTeachers()); } catch (e) { console.warn('Gagal memuatkan guru Firebase:', e); }
+  }, []);
+  useEffect(() => { reloadFsTeachers(); }, [reloadFsTeachers]);
+  const registrySource = useMemo(() => {
+    const logins = new Set(allRegisteredTeachers.map((t: any) => String(t.login || t.loginid || t.login_id || t.id || t["LOGIN ID"] || t["Login ID"] || t["ID"] || t["LOGIN"] || "").trim().toLowerCase()));
+    return [...allRegisteredTeachers, ...fsTeachers.filter(t => !logins.has(t.login.trim().toLowerCase())).map(toRegistryRow)];
+  }, [allRegisteredTeachers, fsTeachers]);
+
   const allTeachers = useMemo(() => {
-    if (allRegisteredTeachers && allRegisteredTeachers.length > 0) {
-      return allRegisteredTeachers
-        .map((teacher) => {
+    if (registrySource && registrySource.length > 0) {
+      return registrySource
+        .map((teacher: any) => {
           // Robust ID/Login detection
           const loginId = String(
             teacher.login || 
@@ -300,7 +320,7 @@ const App: React.FC = () => {
       }
     });
     return Array.from(uniqueTeachers.values()).sort((a, b) => a.name.localeCompare(b.name));
-  }, [allRegisteredTeachers, allRegisteredTeachers.length > 0 ? null : bundles]);
+  }, [registrySource, registrySource.length > 0 ? null : bundles]);
 
   const fetchRobust = async (url: string): Promise<any> => {
     const timestamp = Date.now();
@@ -582,8 +602,8 @@ const App: React.FC = () => {
   useEffect(() => { loadBranding(); }, []);
 
   useEffect(() => {
-    if (user) { reloadDskp(); reloadCalendar(); reloadRpt(); reloadReviews(user); }   // hantaran/semakan Firebase tidak bergantung pada Google Sheet
-  }, [user?.id, reloadDskp, reloadCalendar, reloadRpt, reloadReviews]);
+    if (user) { reloadDskp(); reloadCalendar(); reloadRpt(); reloadReviews(user); reloadPdpc(user); }   // hantaran/semakan Firebase tidak bergantung pada Google Sheet
+  }, [user?.id, reloadDskp, reloadCalendar, reloadRpt, reloadReviews, reloadPdpc]);
 
   // Muat jadual waktu guru dari Firestore; jika tiada, guna jadual lama (localStorage / Google Sheet)
   useEffect(() => {
@@ -623,6 +643,31 @@ const App: React.FC = () => {
     showNotification('✅ Jadual waktu disimpan ke Firebase', 'success');
   };
 
+  // ===== PdPC TIDAK DAPAT DIJALANKAN: simpan + kemas kini refleksi RPH dalam julat tarikh =====
+  const handleSavePdpc = async (input: { startDate: string; endDate: string; reason: string; detail: string; slotIds: string[] }) => {
+    if (!user) return;
+    const reflectionText = await generateExceptionReflection(input.reason, input.detail, input.startDate, input.endDate);
+    const saved = await saveException({ ...input, teacherId: user.id, teacherName: user.name, reflectionText });
+    const nextList = [saved, ...pdpcExceptions.filter(x => x.id !== saved.id)];
+    setPdpcExceptions(nextList);
+    // RPH sedia ada dalam julat tarikh → refleksi diganti secara automatik
+    const mySlots = timetable?.slots || masterSchedule.filter(s => s.teacherId === user.id);
+    const affected = allErphs.filter(e => String(e.teacherId).toLowerCase() === String(user.id).toLowerCase() && e.date >= saved.startDate && e.date <= saved.endDate)
+      .filter(e => {
+        if (!saved.slotIds?.length) return true;
+        const sl = mySlots.find(s => String(s.day).toUpperCase() === String(e.day).toUpperCase() && s.startTime === e.startTime);
+        return !!sl && saved.slotIds.includes(sl.id);
+      });
+    for (const e of affected) await saveErphQuiet({ ...e, reflection: saved.reflectionText, pdpcExceptionId: saved.id });
+    showNotification(`✅ Direkod: ${affected.length} RPH dikemas kini. RPH baharu dalam tarikh ini akan diisi refleksi secara automatik.`, 'success');
+    return saved;
+  };
+  const handleDeletePdpc = async (id: string) => {
+    await deleteException(id);
+    setPdpcExceptions(prev => prev.filter(x => x.id !== id));
+    showNotification('Rekod PdPC ditunda dipadam.', 'info');
+  };
+
   // Simpan RPH auto-jana: Firebase (ditunggu) + Google Sheet, tanpa sync penuh setiap rekod
   const saveErphQuiet = async (data: ERPHData) => {
     setAllErphs(prev => {
@@ -659,6 +704,7 @@ const App: React.FC = () => {
         teacherId: user.id, teacherName: user.name,
         slots: timetable.slots, settings: timetable.autoPilot, calendar: academicCalendar,
         rptDocs, dskpDocs, erphs: [...allErphsRef.current, ...deletedErphsRef.current],
+        exceptions: pdpcExceptions,
         save: saveErphQuiet,
         shouldStop: () => autoStopRef.current,
         onProgress: (message, done, total) => setAutoRun({ running: true, message, done, total }),
@@ -678,7 +724,7 @@ const App: React.FC = () => {
       setAutoRun({ running: false, message: '', done: 0, total: 0 });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user, timetable, academicCalendar, rptDocs, dskpDocs]);
+  }, [user, timetable, academicCalendar, rptDocs, dskpDocs, pdpcExceptions]);
 
   // Auto-jana 24 jam sebelum kelas: semasa aplikasi dibuka & setiap 30 minit
   const runAutoRef = useRef(runAuto);
@@ -688,7 +734,11 @@ const App: React.FC = () => {
     if (!autoReady || !getGeminiKey()) return;
     const first = setTimeout(() => runAutoRef.current('AUTO_24J'), 10000);
     const every = setInterval(() => runAutoRef.current('AUTO_24J'), 30 * 60 * 1000);
-    return () => { clearTimeout(first); clearInterval(every); };
+    // Bila guru kembali ke tab/aplikasi (cth buka telefon) → semak semula serta-merta
+    let lastVis = 0;
+    const onVis = () => { if (document.visibilityState === 'visible' && Date.now() - lastVis > 5 * 60 * 1000) { lastVis = Date.now(); runAutoRef.current('AUTO_24J'); } };
+    document.addEventListener('visibilitychange', onVis);
+    return () => { clearTimeout(first); clearInterval(every); document.removeEventListener('visibilitychange', onVis); };
   }, [autoReady, user?.id]);
 
   useEffect(() => {
@@ -1212,6 +1262,42 @@ const App: React.FC = () => {
   };
 
   // --- KONGSI RPH SEMINGGU SECARA PUKAL ---
+  // ===== KONGSI RPH (Firebase dahulu — pantas & tidak bergantung pada Google Sheet) =====
+  /** Salinan bersih untuk penerima: tiada data semakan/pencerapan/tandatangan, status Draf, ID baharu. */
+  const makeSharedCopy = (erph: ERPHData, recipient: { id: string; name: string }): ERPHData => {
+    const { reviewSignature, reviewComment, reviewedBy, reviewedAt, reviewerDesignation,
+            observationComment, observationSignature, observedBy, observerDesignation, observedAt, isObservation,
+            peerFeedback, sharedWith, submittedAt, bundledInWeek, autoGenerated, generatedAt, generatedBy, generatedFrom,
+            attendance, pdpcExceptionId, ...content } = erph as any;
+    // JSON → buang nilai undefined/fungsi supaya Firestore tidak menolak
+    return JSON.parse(JSON.stringify({
+      ...content,
+      id: `SHR_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+      teacherId: recipient.id, teacherName: recipient.name,
+      status: ERPHStatus.DRAFT, sharedFrom: user?.name || '',
+    }));
+  };
+
+  const shareMany = async (list: ERPHData[], recipientIds: string[]) => {
+    const recipients = recipientIds.map(id => allTeachers.find(t => t.id === id)).filter(Boolean) as any[];
+    if (!recipients.length) throw new Error('Penerima tidak dijumpai dalam senarai guru.');
+    const copies = recipients.flatMap(r => list.map(e => makeSharedCopy(e, r)));
+    // Firestore: maks 500 operasi setiap batch
+    for (let i = 0; i < copies.length; i += 400) {
+      const batch = writeBatch(db);
+      copies.slice(i, i + 400).forEach(c => batch.set(doc(db, "erph_records", c.id), { ...c, createdAt: serverTimestamp(), source: "Kongsi_RPH" }));
+      await batch.commit();
+    }
+    // Salinan ke Google Sheet di latar belakang (tidak menyekat)
+    (async () => {
+      for (const c of copies) {
+        await fetch(GAS_WEB_APP_URL, { method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ ...c, logType: "RPH_RECORD" }) }).catch(() => {});
+        await new Promise(r => setTimeout(r, 300));
+      }
+    })();
+    return { copies, recipients };
+  };
+
   const handleShareWeek = async (week: number, recipientIds: string[]) => {
     if (!user || recipientIds.length === 0) return;
     const mine = allErphs.filter(e =>
@@ -1220,70 +1306,32 @@ const App: React.FC = () => {
       Number(e.week) === Number(week)
     );
     if (mine.length === 0) { showNotification(`Tiada RPH untuk Minggu ${week}`, 'error'); return; }
-
     setSyncStatus('SYNCING');
-    let sent = 0;
     try {
-      for (const recipientId of recipientIds) {
-        const recipient = allTeachers.find(t => t.id === recipientId);
-        if (!recipient) continue;
-        for (const erph of mine) {
-          const { reviewSignature, reviewComment, reviewedBy, reviewedAt, reviewerDesignation,
-                  observationComment, observationSignature, observedBy, observerDesignation, observedAt,
-                  peerFeedback, sharedWith, ...content } = erph as any;
-          const sharedData: ERPHData = {
-            ...content,
-            id: Math.random().toString(36).substr(2, 9),
-            teacherId: recipient.id,
-            teacherName: recipient.name,
-            status: ERPHStatus.DRAFT,
-          };
-          try { fbBackground(setDoc(doc(db, "erph_records", sharedData.id), { ...sharedData, createdAt: serverTimestamp(), source: "Kongsi_Mingguan" })); }
-          catch (fbErr) { console.error("FB Share Gagal:", fbErr); }
-          await fetch(GAS_WEB_APP_URL, {
-            method: 'POST', mode: 'no-cors',
-            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-            body: JSON.stringify({ ...sharedData, logType: "RPH_RECORD" })
-          });
-          sent++;
-          await new Promise(r => setTimeout(r, 400)); // elak had serentak Google Apps Script
-        }
-        sendDirectNotification(`${user.name} berkongsi ${mine.length} RPH Minggu ${week} dengan anda. Semak di senarai RPH (status Draf).`, recipient.id, 'MESSAGE');
-      }
+      const { copies, recipients } = await shareMany(mine, recipientIds);
+      recipients.forEach((r, i) => setTimeout(() => notifyQuiet(`${user.name} berkongsi ${mine.length} RPH Minggu ${week} dengan anda. Semak di senarai RPH (status Draf).`, r.id), i * 300));
       setSyncStatus('IDLE');
-      showNotification(`✅ ${sent} RPH Minggu ${week} dikongsi dengan ${recipientIds.length} guru`, 'success');
-      setTimeout(handleSyncCloud, 2000);
-    } catch (err) {
+      showNotification(`✅ ${copies.length} RPH Minggu ${week} dikongsi dengan ${recipients.length} guru`, 'success');
+    } catch (err: any) {
       console.error("Share week error:", err);
-      setSyncStatus('OFFLINE');
-      showNotification(`Kongsi terhenti selepas ${sent} RPH. Cuba lagi.`, 'error');
+      setSyncStatus('IDLE');
+      showNotification(`Gagal berkongsi: ${err?.message || err}`, 'error');
+      throw err;
     }
   };
 
   const handleShareERPH = async (erph: ERPHData, recipientId: string) => {
-    const recipient = allTeachers.find(t => t.id === recipientId);
-    if (!recipient) return;
-
-    const sharedData: ERPHData = {
-      ...erph,
-      id: Math.random().toString(36).substr(2, 9),
-      teacherId: recipient.id,
-      teacherName: recipient.name,
-      status: ERPHStatus.DRAFT,
-    };
-
+    if (!user) return;
     setSyncStatus('SYNCING');
     try {
-      await fetch(GAS_WEB_APP_URL, {
-        method: 'POST', 
-        mode: 'no-cors', 
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify({ ...sharedData, logType: "RPH_RECORD" })
-      });
+      const { recipients } = await shareMany([erph], [recipientId]);
+      notifyQuiet(`${user.name} berkongsi RPH ${erph.subject} ${erph.classTitle || ''} (${erph.date}) dengan anda.`, recipientId);
       setSyncStatus('IDLE');
-      setTimeout(handleSyncCloud, 1500);
-    } catch (err) { 
-      setSyncStatus('OFFLINE'); 
+      showNotification(`✅ RPH dikongsi dengan ${recipients[0]?.name || 'rakan'}`, 'success');
+    } catch (err: any) {
+      console.error("Share error:", err);
+      setSyncStatus('IDLE');
+      showNotification(`Gagal berkongsi: ${err?.message || err}`, 'error');
     }
   };
 
@@ -1605,7 +1653,7 @@ const App: React.FC = () => {
             } as ERPHData);
             setView('FORM');
           }}
-          onNavigate={(v) => { if (v === 'AUTO_RPH' || v === 'TIMETABLE') setCenterTab(v === 'TIMETABLE' ? 'JADUAL' : 'AUTO'); setView(v === 'TIMETABLE' ? 'AUTO_RPH' : v as any); }}
+          onNavigate={(v) => { if (v === 'AUTO_RPH' || v === 'TIMETABLE' || v === 'PDPC') setCenterTab(v === 'TIMETABLE' ? 'JADUAL' : v === 'PDPC' ? 'PDPC' : 'AUTO'); setView(v === 'TIMETABLE' || v === 'PDPC' ? 'AUTO_RPH' : v as any); }}
           notifications={notifications}
           topSlot={timetable && (
             <AutoRphTodayCard
@@ -1645,6 +1693,9 @@ const App: React.FC = () => {
           onRunWindow={() => runAuto('AUTO_24J')}
           onGenerateWeek={(d) => runAuto('WEEK', d)}
           onStop={stopAuto}
+          pdpcExceptions={pdpcExceptions}
+          onSavePdpc={handleSavePdpc}
+          onDeletePdpc={handleDeletePdpc}
           onOpenErph={(erph) => { setEditingErph(erph); setEditorWeek(undefined); setView('FORM'); }}
           onBack={() => setView(user.role === UserRole.ADMIN ? 'ADMIN' : 'DASHBOARD')}
         />
@@ -1660,6 +1711,7 @@ const App: React.FC = () => {
           onGenerateWeek={(d) => runAuto('WEEK', d)}
           onStopAuto={stopAuto}
           deletedErphs={deletedErphs}
+          pdpcExceptions={pdpcExceptions}
           onDelete={handleDeleteERPH}
           onSkipSlot={handleSkipSlot}
           erphs={allErphs}
@@ -1688,6 +1740,9 @@ const App: React.FC = () => {
           }}
           onReviewBundle={handleReviewBundle}
           onReviewBundles={handleReviewBundles}
+          fsTeachers={fsTeachers}
+          onSaveTeacher={async (t) => { const saved = await saveFirebaseTeacher({ ...t, createdBy: user.name }); await reloadFsTeachers(); return saved; }}
+          onDeleteTeacher={async (login) => { await deleteFirebaseTeacher(login); await reloadFsTeachers(); }}
           onViewBundle={openBundlePreview}
           onSyncMaster={handleSyncMaster}
           onRefresh={handleSyncCloud}

@@ -59,6 +59,7 @@ const UTILITY_MENUS = [
   { id: 'ANALYSIS', label: 'Analisis', icon: BarChart3, color: 'bg-purple-600' },
   { id: 'SCHEDULE', label: 'Jadual', icon: LayoutGrid, color: 'bg-fuchsia-600' },
   { id: 'AUTO_RPH', label: 'RPH Automatik AI', icon: Sparkles, color: 'bg-indigo-600' },
+  { id: 'PDPC', label: 'PdPC Tidak Dijalankan', icon: AlertCircle, color: 'bg-rose-600' },
   { id: 'CHAT', label: 'Notifikasi', icon: MessageCircle, color: 'bg-pink-600' },
   { id: 'REKOD_PENCERAPAN', label: 'Pencerapan', icon: UserCheck, color: 'bg-emerald-600' },
 ];
@@ -623,6 +624,7 @@ const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                   else if (menu.id === 'CHAT') onNavigate?.('CHAT');
                   else if (menu.id === 'SCHEDULE') onNavigate?.('TIMETABLE');
                   else if (menu.id === 'AUTO_RPH') onNavigate?.('AUTO_RPH');
+                  else if (menu.id === 'PDPC') onNavigate?.('PDPC');
                   else if (menu.id === 'REKOD_PENCERAPAN') onNavigate?.('REKOD_PENCERAPAN');
                   else setActiveResView(activeResView === menu.id ? null : menu.id);
                 }}

@@ -6,7 +6,7 @@ import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { db } from '../firebaseConfig';
 import { AutoPilotSettings, ScheduleSlot, TeacherTimetable } from '../types';
 
-export const DEFAULT_AUTOPILOT: AutoPilotSettings = { enabled: true, leadHours: 24, language: 'BM', skipManagement: false };
+export const DEFAULT_AUTOPILOT: AutoPilotSettings = { enabled: true, leadHours: 12, language: 'BM', skipManagement: false };
 
 const withTimeout = <T,>(p: Promise<T>, ms = 15000): Promise<T> =>
   Promise.race([p, new Promise<T>((_, rej) => setTimeout(() => rej(new Error('Firestore tidak memberi respons')), ms))]);
@@ -29,6 +29,7 @@ export async function saveTimetable(tt: TeacherTimetable): Promise<void> {
   const clean = (s: ScheduleSlot): ScheduleSlot => ({
     id: s.id, teacherId: tt.teacherId, day: String(s.day || '').toUpperCase(), startTime: s.startTime, endTime: s.endTime,
     subject: (s.subject || '').trim(), className: (s.className || '').trim(), classTitle: (s.classTitle || '').trim(),
+    studentCount: Number(s.studentCount) > 0 ? Number(s.studentCount) : 0,
   });
   await withTimeout(setDoc(doc(db, 'timetables', safeId(tt.teacherId)), {
     teacherId: tt.teacherId, teacherName: tt.teacherName || '',

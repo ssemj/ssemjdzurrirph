@@ -1,8 +1,10 @@
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { UserProfile, ERPHData, ERPHStatus, MasterData, ScheduleSlot, DskpDocument, RptDocument } from '../types';
-import { planLesson, lessonPosition, findRptDoc, findDskpDoc, lastSpFor, normDay, isFutureWeek } from '../services/autoRphCore';
+import { UserProfile, ERPHData, ERPHStatus, MasterData, ScheduleSlot, DskpDocument, RptDocument, PdpcException } from '../types';
+import { planLesson, lessonPosition, findRptDoc, findDskpDoc, lastSpFor, normDay, isFutureWeek, exceptionFor } from '../services/autoRphCore';
+import { applyAttendance, attendanceLabel } from '../services/geminiService';
+import { reasonLabel } from '../services/pdpcService';
 import { generateErphContent, getGeminiKey, convertToJawi, subjectLanguage, effectiveLanguage, isManagementSubject, MGMT_SK, MGMT_TAJUK, MGMT_SP_FALLBACK, describeManagementSk } from '../services/geminiService';
 import { findDskpRows, getFormOptions, splitField, joinField } from '../services/dskpService';
 import { WEEKS, LANGUAGES } from '../constants';
@@ -32,9 +34,11 @@ interface ERPHFormProps {
   rptDocs?: RptDocument[];
   /** true = slot kosong diisi automatik (RPT/DSKP + Gemini) sebaik dibuka */
   autoFill?: boolean;
+  /** PdPC tidak dapat dijalankan (kursus, MC ...) — refleksi automatik */
+  pdpcExceptions?: PdpcException[];
 }
 
-const ERPHForm: React.FC<ERPHFormProps> = ({ user, onSave, onCancel, masterData, erphs = [], masterSchedule = [], initialData, dskpDocs = [], embedded = false, onSaved, rptDocs = [], autoFill = true }) => {
+const ERPHForm: React.FC<ERPHFormProps> = ({ user, onSave, onCancel, masterData, erphs = [], masterSchedule = [], initialData, dskpDocs = [], embedded = false, onSaved, rptDocs = [], autoFill = true, pdpcExceptions = [] }) => {
   const bbmOptions = masterData.bbmOptions || [
     'Buku Teks',
     'Nota',
@@ -348,6 +352,26 @@ const ERPHForm: React.FC<ERPHFormProps> = ({ user, onSave, onCancel, masterData,
   );
   const [aiExtraNotes, setAiExtraNotes] = useState('');
 
+  // ---- KEHADIRAN MURID: hadir / bilangan murid kelas (dari Jadual Waktu) ----
+  const mySlotForForm = useMemo(() => masterSchedule.find(sl => sl.teacherId === user.id
+    && String(sl.classTitle || '').trim().toUpperCase() === String(formData.classTitle || '').trim().toUpperCase()
+    && Number(sl.studentCount) > 0), [masterSchedule, user.id, formData.classTitle]);
+  const enrolment = Number(formData.enrolment) > 0 ? Number(formData.enrolment) : Number(mySlotForForm?.studentCount) || 0;
+  const langOf = () => effectiveLanguage(formData.subject, formData.language);
+  const setAttendance = (v: string) => {
+    const att = v === '' ? '' : Math.max(0, Math.min(Number(v), enrolment || 999));
+    setFormData(prev => ({ ...prev, attendance: att, enrolment: enrolment || prev.enrolment,
+      reflection: applyAttendance(prev.reflection || '', langOf(), att, enrolment) }));
+  };
+  // ---- PdPC DITUNDA (kursus, MC, cuti bencana ...) pada tarikh ini ----
+  const mySlotId = useMemo(() => masterSchedule.find(sl => sl.teacherId === user.id && normDay(sl.day) === normDay(formData.day) && sl.startTime === formData.startTime)?.id, [masterSchedule, user.id, formData.day, formData.startTime]);
+  const pdpcExc = exceptionFor(pdpcExceptions, formData.date, mySlotId);
+  useEffect(() => {
+    if (pdpcExc && !String(formData.reflection || '').startsWith(pdpcExc.reflectionText.slice(0, 20)))
+      setFormData(prev => ({ ...prev, reflection: pdpcExc.reflectionText, pdpcExceptionId: pdpcExc.id }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pdpcExc?.id]);
+
   // ---- Henti jana / had masa: hasil Gemini yang lewat diabaikan ----
   const genTokenRef = useRef(0);
   const AI_TIMEOUT_MS = 90000;
@@ -387,6 +411,7 @@ const ERPHForm: React.FC<ERPHFormProps> = ({ user, onSave, onCancel, masterData,
         duration: mins > 0 ? `${mins} minit` : undefined,
         extraNotes: aiExtraNotes || undefined,
         teacherSubjects: mgmtSubjects(),
+        attendance: formData.attendance, enrolment: enrolment || undefined,
       }));
       if (token !== genTokenRef.current) return;   // telah dihentikan
       setAutoMsg(noReflection ? '✅ Dijana. Refleksi dikosongkan (RPH minggu hadapan).' : '✅ Dijana oleh Gemini AI.');
@@ -395,7 +420,7 @@ const ERPHForm: React.FC<ERPHFormProps> = ({ user, onSave, onCancel, masterData,
         language: effectiveLanguage(formData.subject, formData.language),   // PI → JAWI, English → BI
         objective: out.objective,
         activities: out.activities,
-        reflection: noReflection ? '' : out.reflection,
+        reflection: pdpcExc ? pdpcExc.reflectionText : noReflection ? '' : out.reflection,
         bbm: 'Lain-lain (nyatakan)',
       }));
       setCustomBbm(out.bbm);
@@ -458,11 +483,12 @@ const ERPHForm: React.FC<ERPHFormProps> = ({ user, onSave, onCancel, masterData,
         language: (formData.language as any) || 'BM',
         duration: mins > 0 ? `${mins} minit` : undefined,
         extraNotes: [plan.notes && `Cadangan dari RPT: ${plan.notes}`, aiExtraNotes].filter(Boolean).join('. ') || undefined,
+        attendance: formData.attendance, enrolment: enrolment || undefined,
       }));
       if (token !== genTokenRef.current) return;   // telah dihentikan
       setFormData(prev => ({
         ...prev, language: effectiveLanguage(formData.subject, formData.language),
-        objective: out.objective, activities: out.activities, reflection: noReflection ? '' : out.reflection, bbm: 'Lain-lain (nyatakan)',
+        objective: out.objective, activities: out.activities, reflection: pdpcExc ? pdpcExc.reflectionText : noReflection ? '' : out.reflection, bbm: 'Lain-lain (nyatakan)',
       }));
       setCustomBbm(out.bbm);
       setAutoMsg(`✅ RPH diisi automatik (${plan.source} + Gemini AI)${noReflection ? ' — refleksi dikosongkan (minggu hadapan)' : ''}. Semak & tekan Simpan.`);
@@ -539,6 +565,7 @@ const ERPHForm: React.FC<ERPHFormProps> = ({ user, onSave, onCancel, masterData,
       reflection: formData.reflection || '',
       bbm: finalBbmValue,
       status: ERPHStatus.SELESAI,
+      attendance: formData.attendance ?? '', enrolment: enrolment || undefined, pdpcExceptionId: pdpcExc?.id,
     };
     onSave(fullData);
   };
@@ -568,6 +595,7 @@ const ERPHForm: React.FC<ERPHFormProps> = ({ user, onSave, onCancel, masterData,
       reflection: formData.reflection || '',
       bbm: finalBbmValue,
       status: ERPHStatus.DRAFT,
+      attendance: formData.attendance ?? '', enrolment: enrolment || undefined, pdpcExceptionId: pdpcExc?.id,
     };
     onSave(fullData);
     
@@ -965,6 +993,28 @@ const ERPHForm: React.FC<ERPHFormProps> = ({ user, onSave, onCancel, masterData,
             />
           )}
           </div>
+
+          {/* PdPC ditunda + Kehadiran murid */}
+          {pdpcExc && (
+            <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-xs text-rose-900">
+              <p className="font-black uppercase tracking-widest text-[10px] text-rose-600 mb-1">PdPC tidak dijalankan — {reasonLabel(pdpcExc.reason)}{pdpcExc.detail ? ` (${pdpcExc.detail})` : ''}</p>
+              <p>Refleksi diisi secara automatik: <i>"{pdpcExc.reflectionText}"</i></p>
+            </div>
+          )}
+          {!isPengurusan && (
+            <div className="flex flex-wrap items-center gap-3 p-4 rounded-2xl bg-emerald-50 border border-emerald-100">
+              <span className="text-[10px] font-black uppercase tracking-widest text-emerald-700">Kehadiran Murid</span>
+              <div className="flex items-center gap-2">
+                <input type="number" min={0} max={enrolment || undefined} inputMode="numeric"
+                  value={formData.attendance ?? ''} onChange={e => setAttendance(e.target.value)} placeholder="___"
+                  className="w-20 p-2 text-center bg-white border border-emerald-200 rounded-xl font-black text-sm outline-none focus:ring-2 focus:ring-emerald-200" />
+                <span className="text-sm font-black text-emerald-800">/ {enrolment || '___'}</span>
+                <span className="text-xs text-emerald-700">murid hadir</span>
+              </div>
+              {!enrolment && <span className="text-[11px] text-amber-700">Bilangan murid belum didaftarkan — isi di <b>RPH Automatik AI → Jadual Waktu</b>.</span>}
+              {enrolment > 0 && <span className="text-[11px] text-emerald-700">Refleksi akan bermula: <b>{attendanceLabel(formData.attendance, enrolment)} murid dapat ...</b></span>}
+            </div>
+          )}
 
           {/* AI Content Section */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">

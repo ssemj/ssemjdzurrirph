@@ -168,7 +168,7 @@ export function drawRphPage(pdf: jsPDF, e: ERPHData, logo: string | null, first:
   drawRow(pdf, [{ text: 'NAMA GURU', label: true, w: LABEL_W }, { text: e.teacherName, w: V, bold: true, upper: true }], cur, newPage);
   drawRow(pdf, [
     { text: 'MATA PELAJARAN', label: true, w: LABEL_W }, { text: e.subject, w: half + 6, bold: true, upper: true },
-    { text: 'KELAS', label: true, w: 20 }, { text: `${e.className || ''}${e.classTitle ? ` (${e.classTitle})` : ''}`, w: half, bold: true, upper: true },
+    { text: 'KELAS', label: true, w: 20 }, { text: `${e.className || ''}${e.classTitle ? ` (${e.classTitle})` : ''}${Number(e.enrolment) > 0 ? ` - HADIR ${String(e.attendance ?? '').trim() || '___'}/${e.enrolment}` : ''}`, w: half, bold: true, upper: true },
   ], cur, newPage);
   drawRow(pdf, [
     { text: 'TARIKH / HARI', label: true, w: LABEL_W }, { text: `${formatDate(e.date)} (${day})`, w: half + 6, bold: true, upper: true },

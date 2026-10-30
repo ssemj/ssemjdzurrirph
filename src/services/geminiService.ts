@@ -294,6 +294,25 @@ export interface ErphAiInput {
   duration?: string;      // cth "60 minit"
   extraNotes?: string;    // arahan tambahan guru
   teacherSubjects?: string[];   // subjek yang diajar guru (untuk RPH Pengurusan)
+  attendance?: number | string; // bilangan murid hadir (kosong = ___)
+  enrolment?: number;           // bilangan murid berdaftar dalam kelas
+}
+
+// ---------- KEHADIRAN MURID dalam refleksi: "28/30 orang murid dapat ..." ----------
+export const attendanceLabel = (att?: number | string, enrol?: number) => {
+  const a = att !== undefined && att !== null && String(att).trim() !== '' ? String(att).trim() : '___';
+  const n = Number(enrol) > 0 ? String(enrol) : '___';
+  return `${a}/${n}`;
+};
+export const reflectionStart = (lang: 'BM' | 'BI' | 'JAWI', att?: number | string, enrol?: number) => {
+  const f = attendanceLabel(att, enrol);
+  return lang === 'BI' ? `${f} pupils were able to` : lang === 'JAWI' ? `${f} موريد داڤت` : `${f} orang murid dapat`;
+};
+const REF_PREFIX = /^\s*(?:_{2,}|\d+)\s*(?:\/\s*(?:_{2,}|\d+)|(?:daripada|out of|درڤد)\s*(?:_{2,}|\d+))\s*(?:orang\s+)?(?:murid|pupils|اورڠ\s*موريد|موريد)(?:\s*(?:dapat|were able to|داڤت))?/i;
+/** Kemas kini awalan refleksi mengikut kehadiran terkini (tidak mengubah ayat lain). */
+export function applyAttendance(reflection: string, lang: 'BM' | 'BI' | 'JAWI', att?: number | string, enrol?: number): string {
+  const r = String(reflection || '');
+  return REF_PREFIX.test(r) ? r.replace(REF_PREFIX, reflectionStart(lang, att, enrol)) : r;
 }
 
 export interface ErphAiOutput {
@@ -320,7 +339,7 @@ export async function generateErphContent(input: ErphAiInput): Promise<ErphAiOut
   const isBI = lang === "BI", isJawi = lang === "JAWI";
   const objStart = isBI ? "At the end of the lesson, pupils will be able to" : isJawi ? "دأخير ڤڠاجرن، موريد داڤت" : "Di akhir PdPC, murid dapat";
   const actStart = isBI ? "Pupils are" : isJawi ? "موريد" : "Murid";
-  const refStart = isBI ? "___ out of ___ pupils were able to" : isJawi ? "___ درڤد ___ اورڠ موريد داڤت" : "___ daripada ___ orang murid dapat";
+  const refStart = reflectionStart(lang, input.attendance, input.enrolment);
 
   const context = (input.dskpRows || [])
     .map(r => `- SK ${r.sk}\n  SP ${r.sp}${r.performance ? `\n  Standard Prestasi: ${r.performance}` : ""}${r.notes ? `\n  Catatan DSKP: ${r.notes}` : ""}`)
@@ -353,7 +372,7 @@ ${isBI ? "Return JSON only. All JSON values must be in English." : isJawi ? "Pul
     config: { responseMimeType: "application/json", responseSchema: ERPH_SCHEMA, temperature: 0.6 },
   });
   const out = parseJson<ErphAiOutput>(res.text);
-  return { ...out, activities: normalizeActivities(out.activities, isBI, isJawi) };
+  return { ...out, activities: normalizeActivities(out.activities, isBI, isJawi), reflection: applyAttendance(out.reflection, lang, input.attendance, input.enrolment) };
 }
 
 // ---------- 3. TUKAR RUMI → JAWI ----------
